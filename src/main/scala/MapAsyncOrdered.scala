@@ -31,23 +31,21 @@ class MapAsyncOrdered[A,B](obs: Observable[A], maxBuffer: Int, fn: A => Task[B])
 		import out.scheduler
 		obs.unsafeSubscribeFn(new Subscriber[A] {
 			implicit val scheduler = out.scheduler
+
+			// mutable state:
 			val buffer = ArrayBuffer.empty[CancelableFuture[B]]
 			val lock:Object = buffer // we just need an object to synchronize on, might as well be the buffer
-
-			// response from onNext, if we're buffering items
-			var pendingResponse : Option[Promise[Ack]] = None
-
 			var isStopped = false
-
-			// mvar acts as single-element buffer for completed events
-			// (since the downstream may not be ready to accept it)
+			var respondUpstream = noResponseNecessary
 			val unconsumedItem = MVar.empty[B]
 
+			val noResponseNecessary:Function[Ack,Unit] = _ => ()
 			val noopTask = Task.now(())
 			val noopFuture = CancelableFuture.successful(())
 
-			// start the emit loop, which loops forever (until Stop)
-			val emitFuture:CancelableFuture[Unit] = {
+			// start the emit loop, which emits one item at a time
+			// to the subscriber
+			val emitLoopThread:CancelableFuture[Unit] = {
 				def loop(): CancelableFuture[Unit] = {
 					unconsumedItem.take.runAsync.flatMap { item =>
 						if (lock.synchronized { isStopped }) {
@@ -66,16 +64,11 @@ class MapAsyncOrdered[A,B](obs: Observable[A], maxBuffer: Int, fn: A => Task[B])
 				loop()
 			}
 
-			private def respond(ack: Ack) {
-				// must be called while holding `lock`
-				pendingResponse.foreach(_.trySuccess(ack))
-			}
-
 			private def stop() {
 				lock.synchronized {
 					isStopped = true
-					emitFuture.cancel()
-					respond(Stop)
+					emitLoopThread.cancel()
+					respondUpstream(Stop)
 				}
 			}
 
@@ -88,7 +81,7 @@ class MapAsyncOrdered[A,B](obs: Observable[A], maxBuffer: Int, fn: A => Task[B])
 							case None => noopTask
 							case Some(Success(value)) => {
 								buffer.remove(0)
-								respond(Continue)
+								respondUpstream(Continue)
 								// once we've put the item into the outgoing mvar,
 								// emit the next ready item (if any)
 								unconsumedItem.put(value).flatMap(_ => emitCompleted)
@@ -106,6 +99,7 @@ class MapAsyncOrdered[A,B](obs: Observable[A], maxBuffer: Int, fn: A => Task[B])
 				}
 			}.flatMap(identity)
 
+
 			def onNext(elem: A): Future[Ack] = lock.synchronized {
 				if (isStopped) return Future.successful(Stop)
 
@@ -114,17 +108,16 @@ class MapAsyncOrdered[A,B](obs: Observable[A], maxBuffer: Int, fn: A => Task[B])
 
 				val returnVal = if (buffer.size < maxBuffer) {
 					// buffer still has room
-					pendingResponse = None
+					respondUpstream = noResponseNecessary
 					Future.successful(Continue)
 				} else {
-					// buffer is full, pendingResponse will be completed
-					// when an item is emitted
+					// buffer is full, promise will be completed when an item is emitted
 					val promise = Promise[Ack]()
-					pendingResponse = Some(promise)
+					respondUpstream = promise.trySuccess
 					promise.future
 				}
 
-				// don't enqueue this until `pendingResponse` has been set
+				// note: we don't enqueue this until `respondUpstream` has been set
 				future.transformWith(_ => {
 					emitCompleted.runAsync
 				})

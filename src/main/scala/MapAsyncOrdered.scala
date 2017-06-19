@@ -1,5 +1,6 @@
 // import monix.execution.Scheduler.Implicits.global
-import monix.execution.misc.AsyncSemaphore
+import monix.execution.misc.{AsyncSemaphore,AsyncQueue}
+import monix.execution.FutureUtils
 import monix.eval._
 import monix.reactive._
 import monix.reactive.OverflowStrategy.BackPressure
@@ -8,6 +9,7 @@ import scala.concurrent.duration._
 import scala.collection.mutable._
 import scala.util.Random
 import scala.util.{Success,Failure}
+import java.util.concurrent.atomic.AtomicInteger
 
 import monix.execution.Ack.{Stop, Continue}
 import monix.execution.cancelables.CompositeCancelable
@@ -20,7 +22,22 @@ object MapAsyncOrdered {
 	implicit class Implicit[T](obs: Observable[T]) {
 		def parallelMapPreservingOrder[R](bufferSize:Int)(fn:T=>Task[R]): Observable[R] = {
 			// See https://github.com/monix/monix/issues/329
+			// new MapAsyncOrdered(obs, bufferSize, fn)
+
 			new MapAsyncOrdered(obs, bufferSize, fn)
+
+			// TODO: remove
+			import monix.execution.Scheduler.Implicits.global
+			val streamOfFutures = obs
+				.map(x => fn(x).runAsync)
+				.asyncBoundary(OverflowStrategy.BackPressure(bufferSize - 1))
+
+			val ghSuggestion = obs
+				.map(x => fn(x).runAsync)
+				.asyncBoundary(OverflowStrategy.BackPressure(bufferSize))
+				.mapFuture(identity)
+
+			new DrainFuturesImmediately(new BufferedRunAsync(obs, bufferSize, fn))
 		}
 	}
 }

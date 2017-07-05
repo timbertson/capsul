@@ -4,11 +4,22 @@ import monix.reactive._
 import monix.reactive.OverflowStrategy.BackPressure
 import scala.concurrent.duration._
 import scala.concurrent._
+import java.util.concurrent.TimeUnit
 import scala.collection.mutable._
 import scala.util.Random
 import MapAsyncOrdered._
 
-object MonixTest extends App {
+object MonixTest {
+	def main() {
+
+	val f = Future{
+		true
+		// throw new RuntimeException("noope")
+	}
+	val rollup = Future.foldLeft(List(f))(false)( _ || _ )
+	Await.result(rollup, Duration(2, TimeUnit.SECONDS))
+
+	System.exit(1)
 
 	println("go...")
 	val rand = new Random()
@@ -83,4 +94,5 @@ object MonixTest extends App {
 	// val result = Await.result(tasks.foreach(println), 20.seconds)
 	// println(s"done: $result")
 	//=> List(0, 2, 4, 6, 8, 10, 12, 14, 16,...
+	}
 }

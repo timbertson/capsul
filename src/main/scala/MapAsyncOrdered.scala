@@ -37,7 +37,10 @@ object MapAsyncOrdered {
 				.asyncBoundary(OverflowStrategy.BackPressure(bufferSize))
 				.mapFuture(identity)
 
-			new DrainFuturesImmediately(new BufferedRunAsync(obs, bufferSize, fn))
+			val preciseStreamOfFutures = new BufferedRunAsync(obs, bufferSize, fn)
+			preciseStreamOfFutures.mapFuture(identity)
+
+			// new DrainFuturesImmediately(new BufferedRunAsync(obs, bufferSize, fn))
 		}
 	}
 }

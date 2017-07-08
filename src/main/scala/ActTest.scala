@@ -27,13 +27,9 @@ class SampleActorWordCount(implicit sched: ExecutionContext) {
 	def print() = state.read(println)
 }
 
-class SampleCountingActor(delay: Int, bufLen: Int)(implicit ec: ExecutionContext) {
+class SampleCountingActor(bufLen: Int)(implicit ec: ExecutionContext) {
 	val state = SequentialState(bufLen = bufLen, v = 0)
 	def inc() = state.mutate { state =>
-		if(delay != 0) {
-			println(s"sleeping $delay ms")
-			Thread.sleep(delay)
-		}
 		state.set(state.get + 1)
 	}
 	def get() = state.read(identity)
@@ -45,8 +41,8 @@ object ActorExample {
 		"hello this is an excellent line!"
 	}.take(n)
 
-	def simpleCounter(bufLen: Int, delay:Int, limit: Int): Future[Int] = {
-		val lineCount = new SampleCountingActor(delay = delay, bufLen=bufLen)
+	def simpleCounter(bufLen: Int, limit: Int): Future[Int] = {
+		val lineCount = new SampleCountingActor(bufLen=bufLen)
 		def loop(i: Int): Future[Int] = {
 			lineCount.inc().flatMap { complete: Future[Unit] =>
 				val nextI = i+1
@@ -55,9 +51,7 @@ object ActorExample {
 						lineCount.get().flatMap(identity)
 					}
 				} else {
-					lineCount.inc().flatMap { _:Future[Unit] =>
-						loop(nextI)
-					}
+					loop(nextI)
 				}
 			}
 		}
@@ -66,15 +60,14 @@ object ActorExample {
 
 	def countWithSequentialStates(bufLen: Int, lines: Iterator[String]): Future[(Int,Int)] = {
 		val wordCounter = new SampleActorWordCount()
-		val lineCount = new SampleCountingActor(bufLen = bufLen, delay = 0)
+		val lineCount = new SampleCountingActor(bufLen = bufLen)
 		def loop(): Future[(Int, Int)] = {
-			println("loop")
 			if (lines.hasNext) {
 				for {
 					numWords: Future[Unit] <- wordCounter.feed(lines.next())
 					numLines: Future[Unit] <- lineCount.inc()
 					// XXX potentially no need to wait until the last round?
-//					result <- numWords.zip(numLines).flatMap(_ => loop())
+					// result <- numWords.zip(numLines).flatMap(_ => loop())
 						result <- (if (lines.hasNext) loop() else numWords.zip(numLines).flatMap(_ => loop()))
 				} yield result
 			} else {
@@ -111,21 +104,20 @@ object ActorExample {
 	}
 
 	def run(): Unit = {
-		val repeat = this.repeat(1) _
+		val repeat = this.repeat(20) _
 		val bufLen = 4
 
 		// count lines
 		repeat {
-			val numLines = 30
-			time("SequentialState", countWithSequentialStates(bufLen = bufLen, lines=makeLines(numLines)))
+			val numLines = 3000
+			time("SequentialState: word count", countWithSequentialStates(bufLen = bufLen, lines=makeLines(numLines)))
 		}
 
-		// repeat {
-		// 	// simple counter
-		// 	val simpleCountLimit = 10
-		// 	val simpleCountDelay = 0
-		// 	time("SequentialState: simple counter", simpleCounter(bufLen = bufLen, delay=simpleCountDelay, limit=simpleCountLimit))
-		// }
+		repeat {
+			// simple counter
+			val simpleCountLimit = 10000
+			time("SequentialState: simple counter", simpleCounter(bufLen = bufLen, limit=simpleCountLimit))
+		}
 	}
 }
 

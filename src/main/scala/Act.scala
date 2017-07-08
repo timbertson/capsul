@@ -159,7 +159,7 @@ class Waiter[A](
 	val task: UnitOfWork[A],
 	promise: Promise[Future[A]]) {
 	def enqueued() {
-		println("waiter enqueued!")
+		// println("waiter enqueued!")
 		promise.success(task.future)
 	}
 }
@@ -168,7 +168,7 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val state = Atomic(ThreadState.empty)
 
 	val workLoop = new Runnable() {
-		println("running")
+		// println("running")
 		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
 		def run() {
 			// XXX tailrec?
@@ -180,17 +180,17 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 //				println(s"I'ma loop ($taskCount), on thread " + Thread.currentThread().getId() + ", task = " + task)
 				task match {
 					case None => {
-						println(s"parked (after $taskCount tasks on thread ${Thread.currentThread().getId()}")
+						// println(s"parked (after $taskCount tasks on thread ${Thread.currentThread().getId()}")
 					}
 					case Some(task) => {
 						taskCount += 1
 						// evaluate this function on this fiber
-						println(s"running task #$taskCount on thread ${Thread.currentThread().getId()}")
+						// println(s"running task #$taskCount on thread ${Thread.currentThread().getId()}")
 						task.run()
 
 						// and promote a waiting task, if any
 						state.transformAndExtract(popWaiter).foreach { waiter =>
-							println("popped a waiter!")
+							// println("popped a waiter!")
 							waiter.enqueued()
 						}
 						loop()
@@ -207,16 +207,16 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {
-		println(s"autoSchedule: $enqueueResult")
+		// println(s"autoSchedule: $enqueueResult")
 		if(enqueueResult.shouldSchedule) {
-			println("scheduling parked thread")
+			// println("scheduling parked thread")
 			ec.execute(workLoop)
 		}
 		enqueueResult.success
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		println("enqueueAsync() called")
+		// println("enqueueAsync() called")
 		val task = UnitOfWork(fun)
 
 		// try an immediate enqueue:
@@ -231,7 +231,7 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 
 		if (done) {
 			//easy mode:
-			println("enqueueAsync completed immediately")
+			// println("enqueueAsync completed immediately")
 			Future.successful(task.future)
 		} else {
 			// slow mode: make a promise and hop in the waiting queue if
@@ -249,9 +249,9 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 			if (done) {
 				waiter.enqueued()
 			}
-			enqueued.future.onComplete { _ =>
-				println("enqueueAsync() task has eventually been enqueued")
-			}
+			// enqueued.future.onComplete { _ =>
+			// 	println("enqueueAsync() task has eventually been enqueued")
+			// }
 			enqueued.future
 		}
 	}

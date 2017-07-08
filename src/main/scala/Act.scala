@@ -10,26 +10,28 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Success, Try}
 // class Actee[T](init: T, sched: Scheduler) {
-// 	private val state = new Atomic[T](init)
-// 	def enqueueSync(f: Function[T,T]
+//	private val state = new Atomic[T](init)
+//	def enqueueSync(f: Function[T,T]
 // }
 
 class Ref[T](init:T) {
- 	@volatile private var v = init
- 	def get = v
- 	def set(updated:T) {
- 		v = updated
- 	}
+	@volatile private var v = init
+	def get = v
+	def set(updated:T) {
+		v = updated
+	}
  }
 
 object SequentialState {
-	def apply[T](v: T)(implicit scheduler: ExecutionContext) = new SequentialState[T](v, scheduler)
+	val defaultBufferSize = 10
+	def apply[T](v: T)(implicit ec: ExecutionContext) = new SequentialState[T](defaultBufferSize, v, ec)
+	def apply[T](bufLen: Int, v: T)(implicit ec: ExecutionContext) = new SequentialState[T](bufLen, v, ec)
 }
 
-class SequentialState[T](init: T, sched: ExecutionContext) {
+class SequentialState[T](bufLen: Int, init: T, ec: ExecutionContext) {
 	// XXX volatile?
 	private val state = new Ref(init)
-	private val thread = new Lwt(sched, bufferSize = 10)
+	private val thread = new Lwt(bufLen)(ec)
 
 	def mutate[R](fn: Function[Ref[T],R]):Future[Future[R]] = {
 		thread.enqueueAsync(() => fn(state))
@@ -76,9 +78,9 @@ case class UnitOfWork[A](fn: Function0[A]) {
 		} catch {
 			case e:Throwable => {
 				if (NonFatal(e)) {
-          promise.failure(e)
+					promise.failure(e)
 				} else {
-          throw e
+					throw e
 				}
 			}
 		}
@@ -89,6 +91,9 @@ case class UnitOfWork[A](fn: Function0[A]) {
 object ThreadState {
 	class EnqueueResult(val success: Boolean, val wasRunning: Boolean) {
 		def shouldSchedule = success && !wasRunning
+		override def toString() = {
+			s"EnqueueResult(success=$success, wasRunning=$wasRunning)"
+		}
 	}
 
 	// pre-bind the combinations we need
@@ -114,8 +119,8 @@ object ThreadState {
 		}
 	}
 
-	def popWaiter(bufferSize: Int, state: ThreadState):(Option[Waiter[_]],ThreadState) = {
-		if (state.waiters.isEmpty || state.tasks.size >= bufferSize) {
+	def popWaiter(bufLen: Int)(state: ThreadState):(Option[Waiter[_]],ThreadState) = {
+		if (state.waiters.isEmpty || state.tasks.size >= bufLen) {
 			(None, state)
 		} else {
 			val (head, tail) = state.waiters.dequeue
@@ -133,18 +138,20 @@ object ThreadState {
 class ThreadState(val tasks: Queue[UnitOfWork[_]], val waiters: Queue[Waiter[_]], val running: Boolean) {
 	import ThreadState._
 
-	def enqueueTask(task: UnitOfWork[_]): ThreadState = new ThreadState(tasks.enqueue(task), waiters, running)
+	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
+		new ThreadState(tasks.enqueue(task), waiters, true)
+	}
 
-	def enqueueWaiter(waiter: Waiter[_]): ThreadState = new ThreadState(tasks, waiters.enqueue(waiter), running)
+	def enqueueWaiter(waiter: Waiter[_]): ThreadState = {
+		assert(running)
+		new ThreadState(tasks, waiters.enqueue(waiter), running)
+	}
 
 	def length = tasks.length
 
 	def park() = {
-		if (running) {
-			new ThreadState(tasks, waiters, running)
-		} else {
-			this
-		}
+		assert(running)
+		new ThreadState(tasks, waiters, false)
 	}
 }
 
@@ -152,17 +159,17 @@ class Waiter[A](
 	val task: UnitOfWork[A],
 	promise: Promise[Future[A]]) {
 	def enqueued() {
-//		println("waiter enqueued!")
-    promise.success(task.future)
+		println("waiter enqueued!")
+		promise.success(task.future)
 	}
 }
 
-class Lwt(sched: ExecutionContext, bufferSize: Int) {
+class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val state = Atomic(ThreadState.empty)
 
 	val workLoop = new Runnable() {
 		println("running")
-		private def popWaiter(state: ThreadState) = ThreadState.popWaiter(bufferSize, state)
+		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
 		def run() {
 			// XXX tailrec?
 			// XXX we may want to park this thread after at least every <n> tasks to prevent starvation.
@@ -173,20 +180,20 @@ class Lwt(sched: ExecutionContext, bufferSize: Int) {
 //				println(s"I'ma loop ($taskCount), on thread " + Thread.currentThread().getId() + ", task = " + task)
 				task match {
 					case None => {
-						println(s"parking (after $taskCount tasks on thread ${Thread.currentThread().getId()}")
+						println(s"parked (after $taskCount tasks on thread ${Thread.currentThread().getId()}")
 					}
 					case Some(task) => {
-            taskCount += 1
-            // evaluate this function on this fiber
-						println(s"running $taskCount task on thread ${Thread.currentThread().getId()}")
-            task.run()
+						taskCount += 1
+						// evaluate this function on this fiber
+						println(s"running task #$taskCount on thread ${Thread.currentThread().getId()}")
+						task.run()
 
-            // and promote a waiting task, if any
-            state.transformAndExtract(popWaiter).foreach { waiter =>
-            	println("popped a waiter!")
-            	waiter.enqueued()
+						// and promote a waiting task, if any
+						state.transformAndExtract(popWaiter).foreach { waiter =>
+							println("popped a waiter!")
+							waiter.enqueued()
 						}
-            loop()
+						loop()
 					}
 				}
 			}
@@ -200,46 +207,50 @@ class Lwt(sched: ExecutionContext, bufferSize: Int) {
 	}
 
 	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {
+		println(s"autoSchedule: $enqueueResult")
 		if(enqueueResult.shouldSchedule) {
-			println("scheduling")
-			sched.execute(workLoop)
+			println("scheduling parked thread")
+			ec.execute(workLoop)
 		}
 		enqueueResult.success
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
+		println("enqueueAsync() called")
 		val task = UnitOfWork(fun)
 
 		// try an immediate enqueue:
 		val done = autoSchedule(state.transformAndExtract { state =>
-			if (state.tasks.length < bufferSize) {
+			if (state.tasks.length < bufLen) {
 				(EnqueueResult.successful(state.running), state.enqueueTask(task))
 			} else {
-				assert(!state.running)
+				assert(state.running, "thread is full but not running!")
 				(EnqueueResult.rejected, state)
 			}
 		})
 
 		if (done) {
 			//easy mode:
+			println("enqueueAsync completed immediately")
 			Future.successful(task.future)
 		} else {
 			// slow mode: make a promise and hop in the waiting queue if
 			// tasks is (still) full
-      val enqueued = Promise[Future[A]]()
+			val enqueued = Promise[Future[A]]()
 			val waiter = new Waiter[A](task, enqueued)
 			val done = autoSchedule(state.transformAndExtract { state =>
-				if (state.length < bufferSize) {
-//					println("enqueued on retry")
+				if (state.length < bufLen) {
 					(EnqueueResult.successful(state.running), state.enqueueTask(task))
 				} else {
-//					println("waiter enqueued")
-					assert(!state.running)
+					assert(state.running, "state should be running!")
 					(EnqueueResult.rejected, state.enqueueWaiter(waiter))
 				}
 			})
 			if (done) {
 				waiter.enqueued()
+			}
+			enqueued.future.onComplete { _ =>
+				println("enqueueAsync() task has eventually been enqueued")
 			}
 			enqueued.future
 		}

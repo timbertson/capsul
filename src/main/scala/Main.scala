@@ -1,4 +1,4 @@
 object Main extends App {
-	MonixTest.main();
-	ActTest.main();
+//	MonixTest.main()
+	ActTest.main()
 }

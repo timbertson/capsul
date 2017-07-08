@@ -29,7 +29,6 @@ object SequentialState {
 }
 
 class SequentialState[T](bufLen: Int, init: T, ec: ExecutionContext) {
-	// XXX volatile?
 	private val state = new Ref(init)
 	private val thread = new Lwt(bufLen)(ec)
 

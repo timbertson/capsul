@@ -2,6 +2,7 @@ import ThreadState.EnqueueResult
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
+import java.util.concurrent.Executors
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -181,7 +182,8 @@ object Pipeline {
 }
 
 object ActorExample {
-	import scala.concurrent.ExecutionContext.Implicits.global
+	implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(4))
+	// import scala.concurrent.ExecutionContext.Implicits.global
 	def makeLines(n:Int=500) = Iterator.continually {
 		"hello this is an excellent line!"
 	}.take(n)

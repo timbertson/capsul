@@ -5,6 +5,7 @@ import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
 
+import scala.annotation.tailrec
 import scala.collection.immutable.Queue
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
@@ -170,11 +171,10 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 		// println("running")
 		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
 		def run() {
-			// XXX tailrec?
 			// XXX we may want to park this thread after at least every <n> tasks to prevent starvation.
 			// If we do, who will schedule it again?
 			var taskCount = 0
-			def loop(): Unit = {
+			@tailrec def loop(): Unit = {
 				val task = state.transformAndExtract(ThreadState.popTask)
 //				println(s"I'ma loop ($taskCount), on thread " + Thread.currentThread().getId() + ", task = " + task)
 				task match {

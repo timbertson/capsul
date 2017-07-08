@@ -2,12 +2,12 @@ import ThreadState.EnqueueResult
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
-import java.util.concurrent.Executors
+import java.util.concurrent.{Executors, TimeUnit}
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, ExecutionContext, Future, Promise}
+import scala.concurrent._
 import scala.util._
 
 
@@ -16,10 +16,6 @@ class SampleActorWordCount(implicit sched: ExecutionContext) {
 	def feed(line: String) = state.mutate { state =>
 		val old = state.get
 		state.set(state.get + line.split("\\w").length)
-		if (old > 12380) {
-			// XXX hacky
-//			println(s"updated word count from: $old -> ${state.get}")
-		}
 	}
 
 	def reset() = state.mutate(_.set(0))
@@ -138,25 +134,48 @@ class PipelineStage[T,R](
 
 object Pipeline {
 	def run(stages: Int, len:Int, bufLen: Int, timePerStep: Int, jitter: Float)(implicit ec: ExecutionContext): Future[Int] = {
-		val source = Iterator.continually { () }.take(len)
+		val source = Iterator.continually { () }.take(len - 1)
 		val sink = SequentialState(bufLen, v = 0)
-		def finalize(batch: List[Try[Unit]]): Future[Unit] = {
+		val drained = Promise[Int]()
+		def finalize(batch: List[Try[Option[Unit]]]): Future[Unit] = {
 			sink.mutate { state =>
 				state.set(state.get + batch.size)
-			}.map((_:Future[Unit]) => ())
+				// println("after batch " + batch + ", size = " + state.get)
+				if (batch.exists(_.get.isEmpty)) {
+					drained.success(state.get)
+				}
+				()
+			}.flatMap(identity)
 		}
-		def process(item: Unit) = {
+
+		def process(item: Option[Unit]):Future[Option[Unit]] = {
 			Future {
-				val sleepTime: Int = timePerStep + (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
-				Thread.sleep(sleepTime)
+				item.foreach { (_:Unit) =>
+					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
+					Thread.sleep(timePerStep + jitterMs)
+				}
+				item
 			}
 		}
 
-		def connect(sink: Function[List[Try[Unit]], Future[Unit]], stages: Int):Function[List[Try[Unit]], Future[Unit]] = {
+		def connect(
+			sink: Function[List[Try[Option[Unit]]], Future[Unit]],
+			stages: Int):Function[List[Try[Option[Unit]]], Future[Unit]] =
+		{
 			val stage = new PipelineStage(bufLen, process, sink)
-			def handleBatch(batch: List[Try[Unit]]): Future[Unit] = {
-				Future.sequence(batch.map(item => stage.enqueue(item.get)))
-					.map((_:List[Unit]) => ())
+			def handleBatch(batch: List[Try[Option[Unit]]]): Future[Unit] = {
+				batch.foldLeft(Future.successful(())) { (acc, tryItem) =>
+					acc.flatMap { (_:Unit) =>
+						val item = tryItem.get // we don't fail 'round these parts...
+						val enqueued = stage.enqueue(item)
+						if (item.isDefined) {
+							enqueued.flatMap((_:Unit) => stage.enqueue(item))
+						} else {
+							// just enqueue EOF once
+							enqueued
+						}
+					}
+				}
 			}
 			if (stages == 0) {
 				handleBatch
@@ -169,21 +188,22 @@ object Pipeline {
 		def pushWork():Future[Unit] = {
 			if (source.hasNext) {
 				val item = source.next
-				fullPipeline(List(Success(item))).flatMap((_:Unit) => pushWork())
+				fullPipeline(List(Success(Some(item)))).flatMap((_:Unit) => pushWork())
 			} else {
-				Future.successful(())
+				fullPipeline(List(Success(None)))
 			}
 		}
 
 		pushWork().flatMap { (_:Unit) =>
-			sink.read(identity).flatMap(identity)
+			drained.future
 		}
 	}
 }
 
 object ActorExample {
-	implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(4))
-	// import scala.concurrent.ExecutionContext.Implicits.global
+	val threadPool = Executors.newFixedThreadPool(4)
+	implicit val ec = ExecutionContext.fromExecutor(threadPool)
+	// val globalEc = scala.concurrent.ExecutionContext.Implicits.global
 	def makeLines(n:Int=500) = Iterator.continually {
 		"hello this is an excellent line!"
 	}.take(n)
@@ -232,13 +252,15 @@ object ActorExample {
 
 	def time(name:String, impl: => Future[_]) = {
 		val start = System.currentTimeMillis()
-//		println("Start")
+		// println("Start")
 		val f = impl
-//		println("(computed)")
-		val result = Await.result(f, Duration.Inf)
+		// println("(computed)")
+		val result = Try {
+			Await.result(f, Duration(3, TimeUnit.SECONDS))
+		}
 		val end = System.currentTimeMillis()
 		val duration = end - start
-//		println("Done")
+		// println("Done")
 		println(s"implementation $name took $duration ms to calculate $result")
 	}
 
@@ -251,7 +273,7 @@ object ActorExample {
 	}
 
 	def run(): Unit = {
-		val repeat = this.repeat(20) _
+		val repeat = this.repeat(10) _
 		val bufLen = 4
 
 		// count lines (2 actors in parallel)
@@ -292,14 +314,16 @@ object ActorExample {
 		}
 
 		repeat {
-			time("SequentialState: n=5, t=5, x20 pipeline", Pipeline.run(
-				stages = 5,
+			time("SequentialState: n=4, t=3, x20 pipeline", Pipeline.run(
+				stages = 4,
 				len = 20,
 				bufLen = bufLen,
-				timePerStep = 5,
+				timePerStep = 3,
 				jitter = 0.5f
 			))
 		}
+
+		threadPool.shutdown()
 	}
 }
 

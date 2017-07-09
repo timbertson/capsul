@@ -133,7 +133,17 @@ class PipelineStage[T,R](
 }
 
 object Pipeline {
-	def run(stages: Int, len:Int, bufLen: Int, timePerStep: Int, jitter: Float)(implicit ec: ExecutionContext): Future[Int] = {
+	def run(
+		stages: Int,
+		len:Int,
+		bufLen: Int,
+		parallelism: Int,
+		timePerStep: Int,
+		jitter: Float
+	)(implicit ec: ExecutionContext): Future[Int] = {
+		val threadPool = Executors.newFixedThreadPool(parallelism)
+		val workEc = ExecutionContext.fromExecutor(threadPool)
+
 		val source = Iterator.continually { () }.take(len - 1)
 		val sink = SequentialState(bufLen, v = 0)
 		val drained = Promise[Int]()
@@ -141,21 +151,29 @@ object Pipeline {
 			sink.mutate { state =>
 				state.set(state.get + batch.size)
 				// println("after batch " + batch + ", size = " + state.get)
+			}.flatMap { (done:Future[Unit]) =>
 				if (batch.exists(_.get.isEmpty)) {
-					drained.success(state.get)
+					// read the final state
+					done.flatMap((_:Unit) =>
+						sink.read(identity).flatMap(identity).map { count =>
+							drained.success(count)
+							()
+						}
+					)
+				} else {
+					done
 				}
-				()
-			}.flatMap(identity)
+			}
 		}
 
 		def process(item: Option[Unit]):Future[Option[Unit]] = {
-			Future {
+			Future({
 				item.foreach { (_:Unit) =>
 					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
 					Thread.sleep(timePerStep + jitterMs)
 				}
 				item
-			}
+			})(workEc)
 		}
 
 		def connect(
@@ -164,16 +182,9 @@ object Pipeline {
 		{
 			val stage = new PipelineStage(bufLen, process, sink)
 			def handleBatch(batch: List[Try[Option[Unit]]]): Future[Unit] = {
-				batch.foldLeft(Future.successful(())) { (acc, tryItem) =>
+				batch.foldLeft(Future.successful(())) { (acc, item) =>
 					acc.flatMap { (_:Unit) =>
-						val item = tryItem.get // we don't fail 'round these parts...
-						val enqueued = stage.enqueue(item)
-						if (item.isDefined) {
-							enqueued.flatMap((_:Unit) => stage.enqueue(item))
-						} else {
-							// just enqueue EOF once
-							enqueued
-						}
+						stage.enqueue(item.get)
 					}
 				}
 			}
@@ -195,9 +206,70 @@ object Pipeline {
 		}
 
 		pushWork().flatMap { (_:Unit) =>
+			drained.future.onComplete( _ => threadPool.shutdown())
 			drained.future
 		}
 	}
+
+	def runAkka(
+		stages: Int,
+		len: Int,
+		parallelism: Int,
+		timePerStep: Int,
+		bufLen: Int,
+		jitter: Float
+	):Future[Int] = {
+		import akka.stream._
+		import akka.stream.scaladsl._
+		import akka.{ NotUsed, Done }
+		import akka.actor.ActorSystem
+		import akka.util.ByteString
+		import scala.concurrent._
+		import scala.concurrent.duration._
+		import java.nio.file.Paths
+
+		implicit val system = ActorSystem("akka-example")
+		implicit val materializer = ActorMaterializer()
+
+		val threadPool = Executors.newFixedThreadPool(parallelism)
+		val workEc = ExecutionContext.fromExecutor(threadPool)
+
+		// val promise = Promise[Int]()
+		val source: Source[Option[Int], NotUsed] = Source(1 to len).map(i => Some(0))
+		val sink = Sink.fold[Int,Option[Int]](0) { (i, token) =>
+			i + token.getOrElse(0)
+		}
+
+		def process(item: Option[Int]):Future[Option[Int]] = {
+			Future({
+				item.foreach { (_:Int) =>
+					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
+					Thread.sleep(timePerStep + jitterMs)
+				}
+				// println(item.map(_+1))
+				item.map(_ + 1)
+			})(workEc)
+		}
+
+		def connect(
+			source: Source[Option[Int], NotUsed],
+			stages: Int): Source[Option[Int], NotUsed] = {
+			if (stages == 0) {
+				source
+			} else {
+				connect(source.mapAsync(bufLen)(process), stages - 1)
+			}
+		}
+
+		val flow = connect(source, stages)
+
+		flow.toMat(sink)(Keep.right).run().map({ ret =>
+			system.terminate()
+			threadPool.shutdown()
+			ret
+		})(workEc)
+	}
+
 }
 
 object ActorExample {
@@ -308,21 +380,35 @@ object ActorExample {
 				stages = 5,
 				len = 100,
 				bufLen = bufLen,
+				parallelism = 4,
 				timePerStep = 0,
 				jitter = 0.5f
 			))
 		}
 
 		repeat {
-			time("SequentialState: n=4, t=3, x20 pipeline", Pipeline.run(
+			time("SequentialState: n=4, t=3, x50 pipeline", Pipeline.run(
 				stages = 4,
-				len = 20,
+				len = 50,
 				bufLen = bufLen,
+				parallelism = 4,
 				timePerStep = 3,
 				jitter = 0.5f
 			))
 		}
 
+		repeat {
+			time("Akka-streams: n=4, t=3, x50 pipeline", Pipeline.runAkka(
+				stages = 4,
+				len = 50,
+				bufLen = bufLen,
+				parallelism = 4,
+				timePerStep = 3,
+				jitter = 0.5f
+			))
+		}
+
+		println("Done - shutting down...")
 		threadPool.shutdown()
 	}
 }

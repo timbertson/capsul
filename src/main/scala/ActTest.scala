@@ -438,11 +438,12 @@ object ActorExample {
 		while(attempt>0) {
 			f
 			attempt -= 1
+			Thread.sleep(10)
 		}
 	}
 
 	def run(): Unit = {
-		val repeat = this.repeat(10) _
+		val repeat = this.repeat(20) _
 		val bufLen = 4
 
 		// // count lines (2 actors in parallel)

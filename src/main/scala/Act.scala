@@ -161,7 +161,7 @@ class Waiter[A](
 }
 
 object SequentialExecutor {
-	val defaultBufferSize = 20
+	val defaultBufferSize = 5
 	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
 }
 

@@ -10,10 +10,6 @@ import scala.collection.immutable.Queue
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Success, Try}
-// class Actee[T](init: T, sched: Scheduler) {
-//	private val state = new Atomic[T](init)
-//	def enqueueSync(f: Function[T,T]
-// }
 
 class Ref[T](init:T) {
 	@volatile private var v = init
@@ -21,17 +17,19 @@ class Ref[T](init:T) {
 	def set(updated:T) {
 		v = updated
 	}
- }
-
-object SequentialState {
-	val defaultBufferSize = 10
-	def apply[T](v: T)(implicit ec: ExecutionContext) = new SequentialState[T](defaultBufferSize, v, ec)
-	def apply[T](bufLen: Int, v: T)(implicit ec: ExecutionContext) = new SequentialState[T](bufLen, v, ec)
 }
 
-class SequentialState[T](bufLen: Int, init: T, ec: ExecutionContext) {
+object SequentialState {
+	def apply[T](v: T)(implicit ec: ExecutionContext) =
+		new SequentialState[T](Lwt(), v)
+
+	def apply[T](v: T, lwt: Lwt)(implicit ec: ExecutionContext) =
+		new SequentialState[T](lwt, v)
+}
+
+class SequentialState[T](thread: Lwt, init: T) {
 	private val state = new Ref(init)
-	private val thread = new Lwt(bufLen)(ec)
+	// private val thread = new Lwt(bufLen)(ec)
 
 	// Naming:
 	//
@@ -50,7 +48,7 @@ class SequentialState[T](bufLen: Int, init: T, ec: ExecutionContext) {
 	// mutate(fn: Function[State[T],R]
 	// map(fn: Function[T,T])
 	// set(value: T)
-	// access: Function[T,T] -> accepts a mutable Ref for both reading and setting.
+	// access: Function[T,R] -> accepts a mutable Ref for both reading and setting.
 
 	// sendMutate: omitted; sendMap is just as functional
 	def sendMap(fn: Function[T,T]):             Future[Unit]         = thread.enqueueOnly(() => state.set(fn(state.current)))
@@ -69,26 +67,6 @@ class SequentialState[T](bufLen: Int, init: T, ec: ExecutionContext) {
 
 //// Supervisor strategy: I guess just have an uncaughtHandler per LWT?
 //// You should be using Try instead of exceptions anyway...
-//
-//class RequestHandler(stats: Stats) {
-//	val db = new DbPool()
-//	val fs = new FS()
-//
-//	// Stats is an "Actor". But you know what?
-//	// nobody gives a shit. It has methods which return Future[Something],
-//	// so you can just call it. It might also have some non-future methods,
-//	// in which case they won't be mutating state...
-//
-//	def request(req: Request): Future[Response] {
-//		// fire and forget
-//		stats.incrementPageCount(req.page) // Future[Unit]
-//
-//		// chain futures
-//		db.fetchModel(req.params("id")).map { model =>
-//			renderPage(model)
-//		}
-//	}
-//}
 
 case class UnitOfWork[A](fn: Function0[A]) {
 	val promise = Promise[A]()
@@ -180,32 +158,28 @@ class Waiter[A](
 	val task: UnitOfWork[A],
 	promise: Promise[Future[A]]) {
 	def enqueued() {
-		// println("waiter enqueued!")
 		promise.success(task.future)
 	}
+}
+
+object Lwt {
+	val defaultBufferSize = 20
+	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new Lwt(bufLen)
 }
 
 class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val state = Atomic(ThreadState.empty)
 
-	val workLoop = new Runnable() {
+	val workLoop:Runnable = new Runnable() {
 		// println("running")
 		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
 		def run() {
-			// XXX we may want to park this thread after at least every <n> tasks to prevent starvation.
-			// If we do, who will schedule it again?
-			var taskCount = 0
-			@tailrec def loop(): Unit = {
+			@tailrec def loop(maxIterations: Int): Unit = {
 				val task = state.transformAndExtract(ThreadState.popTask)
-//				println(s"I'ma loop ($taskCount), on thread " + Thread.currentThread().getId() + ", task = " + task)
 				task match {
-					case None => {
-						// println(s"parked (after $taskCount tasks on thread ${Thread.currentThread().getId()}")
-					}
+					case None => ()
 					case Some(task) => {
-						taskCount += 1
 						// evaluate this function on this fiber
-						// println(s"running task #$taskCount on thread ${Thread.currentThread().getId()}")
 						task.run()
 
 						// and promote a waiting task, if any
@@ -213,18 +187,18 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 							// println("popped a waiter!")
 							waiter.enqueued()
 						}
-						loop()
+
+						if (maxIterations == 0) {
+							// re-enqueue the runnable instead of looping to prevent starvation
+							ec.execute(workLoop)
+						} else {
+							loop(maxIterations - 1)
+						}
 					}
 				}
 			}
-			loop()
+			loop(200)
 		}
-	}
-
-	def enqueueSync[A](fun: Function0[A]): Future[A] = {
-		// TODO: reimplementing is probably more efficient
-		// TODO: do we even want this ability?
-		Await.result(enqueueAsync(fun), Duration.Inf)
 	}
 
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
@@ -278,9 +252,6 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 			if (done) {
 				waiter.enqueued()
 			}
-			// enqueued.future.onComplete { _ =>
-			// 	println("enqueueAsync() task has eventually been enqueued")
-			// }
 			enqueued.future
 		}
 	}

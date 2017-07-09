@@ -20,15 +20,15 @@ class SampleActorWordCount(implicit sched: ExecutionContext) {
 	def current = state.current
 }
 
-class SampleCountingActor(bufLen: Int)(implicit ec: ExecutionContext) {
-	val state = SequentialState(bufLen = bufLen, v = 0)
+class SampleCountingActor()(implicit ec: ExecutionContext) {
+	val state = SequentialState(v = 0)
 	def inc() = state.sendMap(_ + 1)
 	def current = state.current
 }
 
-class PingPongActor(bufLen: Int)(implicit ec: ExecutionContext) {
+class PingPongActor()(implicit ec: ExecutionContext) {
 	var peer: PingPongActor = null
-	val state = SequentialState[List[Int]](bufLen = bufLen, v = Nil)
+	val state = SequentialState[List[Int]](v = Nil)
 	def setPeer(newPeer: PingPongActor) {
 		peer = newPeer
 	}
@@ -46,9 +46,9 @@ class PingPongActor(bufLen: Int)(implicit ec: ExecutionContext) {
 }
 
 object PingPongActor {
-	def run(n: Int, bufLen: Int)(implicit ec: ExecutionContext): Future[Int] = {
-		val a = new PingPongActor(bufLen)
-		val b = new PingPongActor(bufLen)
+	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
+		val a = new PingPongActor()
+		val b = new PingPongActor()
 		a.setPeer(b)
 		b.setPeer(a)
 		a.ping(n).flatMap { case () =>
@@ -63,7 +63,7 @@ class PipelineStage[T,R](
 	process: Function[T,Future[R]],
 	handleCompleted: Function[List[Try[R]], Future[_]]
 )(implicit ec: ExecutionContext) {
-	val state = SequentialState(bufLen = bufLen, v = new State())
+	val state = SequentialState(v = new State())
 
 	class State {
 		val queue = new mutable.Queue[Future[R]]()
@@ -135,7 +135,7 @@ object Pipeline {
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		val source = Iterator.continually { 0 }.take(len)
-		val sink = SequentialState(bufLen, v = 0)
+		val sink = SequentialState(0)
 		val drained = Promise[Int]()
 		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
 			val mapSent = sink.awaitMap { current =>
@@ -263,7 +263,9 @@ object Pipeline {
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		// val promise = Promise[Int]()
-		val source: Source[Option[Int], NotUsed] = Source(1 to len).map(i => Some(0))
+		val source: Source[Option[Int], NotUsed] = Source.fromIterator(() =>
+			Iterator.continually { Some(0) }.take(len)
+		)
 		val sink = Sink.fold[Int,Option[Int]](0) { (i, token) =>
 			// println(s"after batch $token, size = ${i}")
 			i + token.getOrElse(0)
@@ -308,8 +310,8 @@ object ActorExample {
 		"hello this is an excellent line!"
 	}.take(n)
 
-	def simpleCounter(bufLen: Int, limit: Int): Future[Int] = {
-		val lineCount = new SampleCountingActor(bufLen=bufLen)
+	def simpleCounter(limit: Int): Future[Int] = {
+		val lineCount = new SampleCountingActor()
 		def loop(i: Int): Future[Int] = {
 			lineCount.inc().flatMap { _: Unit =>
 				val nextI = i+1
@@ -323,9 +325,9 @@ object ActorExample {
 		loop(0)
 	}
 
-	def countWithSequentialStates(bufLen: Int, lines: Iterator[String]): Future[(Int,Int)] = {
+	def countWithSequentialStates(lines: Iterator[String]): Future[(Int,Int)] = {
 		val wordCounter = new SampleActorWordCount()
-		val lineCount = new SampleCountingActor(bufLen = bufLen)
+		val lineCount = new SampleCountingActor()
 		def loop(): Future[(Int, Int)] = {
 			if (lines.hasNext) {
 				for {
@@ -373,64 +375,71 @@ object ActorExample {
 		val repeat = this.repeat(10) _
 		val bufLen = 4
 
-		// count lines (2 actors in parallel)
-		repeat {
-			val numLines = 3000
-			time("SequentialState: word count", countWithSequentialStates(bufLen = bufLen, lines=makeLines(numLines)))
-		}
+		// // count lines (2 actors in parallel)
+		// repeat {
+		// 	val numLines = 3000
+		// 	time("SequentialState: word count", countWithSequentialStates(bufLen = bufLen, lines=makeLines(numLines)))
+		// }
+    //
+		// // simple counter (1 actor in serial)
+		// repeat {
+		// 	val countLimit = 10000
+		// 	time("SequentialState: simple counter", simpleCounter(bufLen = bufLen, limit=countLimit))
+		// }
+    //
+		// repeat {
+		// 	val countLimit = 1000000
+		// 	time("while loop counter", {
+		// 		var i = 0
+		// 		while (i < countLimit) {
+		// 			i += 1
+		// 		}
+		// 		Future.successful(i)
+		// 	})
+		// }
+    //
+		// repeat {
+		// 	time("SequentialState: explosive ping", PingPongActor.run(1000, bufLen = bufLen))
+		// }
 
-		// simple counter (1 actor in serial)
-		repeat {
-			val countLimit = 10000
-			time("SequentialState: simple counter", simpleCounter(bufLen = bufLen, limit=countLimit))
-		}
+		// repeat {
+		// 	time("SequentialState: n=5, t=0, x100 pipeline", Pipeline.run(
+		// 		stages = 5,
+		// 		len = 100,
+		// 		bufLen = bufLen,
+		// 		parallelism = 4,
+		// 		timePerStep = 0,
+		// 		jitter = 0.5f
+		// 	))
+		// }
+
+		// pipeline comparison:
+		val stages = 3
+		val len = 200
+		val parallelism = 3
+		val timePerStep = 1
+		val jitter = 0.5f
 
 		repeat {
-			val countLimit = 1000000
-			time("while loop counter", {
-				var i = 0
-				while (i < countLimit) {
-					i += 1
-				}
-				Future.successful(i)
-			})
-		}
-
-		repeat {
-			time("SequentialState: explosive ping", PingPongActor.run(1000, bufLen = bufLen))
-		}
-
-		repeat {
-			time("SequentialState: n=5, t=0, x100 pipeline", Pipeline.run(
-				stages = 5,
-				len = 100,
+			time(s"SequentialState: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.run(
+				stages = stages,
+				len = len,
 				bufLen = bufLen,
-				parallelism = 4,
-				timePerStep = 0,
-				jitter = 0.5f
-			))
-		}
-
-		repeat {
-			time("SequentialState: n=4, t=3, x50 pipeline", Pipeline.run(
-				stages = 4,
-				len = 50,
-				bufLen = bufLen,
-				parallelism = 4,
-				timePerStep = 3,
-				jitter = 0.5f
+				parallelism = parallelism,
+				timePerStep = timePerStep,
+				jitter = jitter
 			))
 		}
 
 		implicit val monixScheduler = monix.execution.Scheduler(ec)
 		repeat {
-			time("Monix: n=4, t=3, x50 pipeline", Pipeline.runMonix(
-				stages = 4,
-				len = 50,
+			time(s"Monix: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runMonix(
+				stages = stages,
+				len = len,
 				bufLen = bufLen,
-				parallelism = 4,
-				timePerStep = 3,
-				jitter = 0.5f
+				parallelism = parallelism,
+				timePerStep = timePerStep,
+				jitter = jitter
 			))
 		}
 
@@ -438,13 +447,13 @@ object ActorExample {
 		implicit val actorSystem = ActorSystem("akka-example")
 		implicit val akkaMaterializer = ActorMaterializer()
 		repeat {
-			time("Akka-streams: n=4, t=3, x50 pipeline", Pipeline.runAkka(
-				stages = 4,
-				len = 50,
+			time(s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runAkka(
+				stages = stages,
+				len = len,
 				bufLen = bufLen,
-				parallelism = 4,
-				timePerStep = 3,
-				jitter = 0.5f
+				parallelism = parallelism,
+				timePerStep = timePerStep,
+				jitter = jitter
 			))
 		}
 

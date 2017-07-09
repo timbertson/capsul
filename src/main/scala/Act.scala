@@ -21,16 +21,14 @@ class Ref[T](init:T) {
 
 object SequentialState {
 	def apply[T](v: T)(implicit ec: ExecutionContext) =
-		new SequentialState[T](Lwt(), v)
+		new SequentialState[T](v, SequentialExecutor())
 
-	def apply[T](v: T, lwt: Lwt)(implicit ec: ExecutionContext) =
-		new SequentialState[T](lwt, v)
+	def apply[T](v: T, thread: SequentialExecutor)(implicit ec: ExecutionContext) =
+		new SequentialState[T](v, thread)
 }
 
-class SequentialState[T](thread: Lwt, init: T) {
+class SequentialState[T](init: T, thread: SequentialExecutor) {
 	private val state = new Ref(init)
-	// private val thread = new Lwt(bufLen)(ec)
-
 	// Naming:
 	//
 	//  - send*:    Enqueue an action, returning Future[Unit]. Once the future is resolved, the
@@ -65,7 +63,7 @@ class SequentialState[T](thread: Lwt, init: T) {
 	def rawAccess[R](fn: Function[T,R]):        Future[Future[R]]    = thread.enqueueAsync(() => fn(state.current))
 }
 
-//// Supervisor strategy: I guess just have an uncaughtHandler per LWT?
+//// Supervisor strategy: I guess just have an uncaughtHandler per thread?
 //// You should be using Try instead of exceptions anyway...
 
 case class UnitOfWork[A](fn: Function0[A]) {
@@ -142,14 +140,14 @@ class ThreadState(val tasks: Queue[UnitOfWork[_]], val waiters: Queue[Waiter[_]]
 	}
 
 	def enqueueWaiter(waiter: Waiter[_]): ThreadState = {
-		assert(running)
+		// assert(running)
 		new ThreadState(tasks, waiters.enqueue(waiter), running)
 	}
 
 	def length = tasks.length
 
 	def park() = {
-		assert(running)
+		// assert(running)
 		new ThreadState(tasks, waiters, false)
 	}
 }
@@ -162,12 +160,12 @@ class Waiter[A](
 	}
 }
 
-object Lwt {
+object SequentialExecutor {
 	val defaultBufferSize = 20
-	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new Lwt(bufLen)
+	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
 }
 
-class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
+class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val state = Atomic(ThreadState.empty)
 
 	val workLoop:Runnable = new Runnable() {
@@ -227,7 +225,7 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 			if (state.tasks.length < bufLen) {
 				(EnqueueResult.successful(state.running), state.enqueueTask(task))
 			} else {
-				assert(state.running, "thread is full but not running!")
+				// assert(state.running, "thread is full but not running!")
 				(EnqueueResult.rejected, state)
 			}
 		})
@@ -245,7 +243,7 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (state.length < bufLen) {
 					(EnqueueResult.successful(state.running), state.enqueueTask(task))
 				} else {
-					assert(state.running, "state should be running!")
+					// assert(state.running, "state should be running!")
 					(EnqueueResult.rejected, state.enqueueWaiter(waiter))
 				}
 			})

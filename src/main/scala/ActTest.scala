@@ -10,8 +10,21 @@ import scala.concurrent.duration.Duration
 import scala.concurrent._
 import scala.util._
 
-import akka.actor.ActorSystem
+import akka.actor.{ActorSystem,Actor}
 import akka.stream.{Materializer,ActorMaterializer}
+
+object Sleep {
+	def jittered(base: Float, jitter: Float) = {
+		val jitterMs = (Random.nextFloat() * base * jitter)
+		val sleepMs = Math.max(0, (base + jitterMs).toInt)
+
+		// var limit = sleepMs
+		// while(limit > 0) {
+		// 	limit -= 1
+		// }
+		Thread.sleep(sleepMs)
+	}
+}
 
 class SampleActorWordCount(implicit sched: ExecutionContext) {
 	val state = SequentialState(0)
@@ -24,6 +37,69 @@ class SampleCountingActor()(implicit ec: ExecutionContext) {
 	val state = SequentialState(v = 0)
 	def inc() = state.sendMap(_ + 1)
 	def current = state.current
+}
+
+class CounterActor extends Actor {
+	import CounterActor._
+
+	var i = 0
+
+	def receive = {
+		case Increment => i += 1
+		case Decrement => i -= 1
+		case ReturnCount(p) => p.success(i)
+	}
+}
+
+object CounterActor {
+	sealed trait Message
+	case object Increment extends Message
+	case object Decrement extends Message
+	case class ReturnCount(p: Promise[Int]) extends Message
+
+	def run(n: Int)(implicit system: ActorSystem, ec: ExecutionContext): Future[Int] = {
+		import akka.actor.Props
+		val counter = system.actorOf(Props[CounterActor])
+		var limit = n
+		while(limit > 0) {
+			counter ! Increment
+			limit -= 1
+		}
+		val result = Promise[Int]()
+		counter ! ReturnCount(result)
+		result.future
+	}
+}
+
+class CounterState()(implicit ec: ExecutionContext) {
+	private val state = SequentialState(0)
+	def inc() = state.sendMap(_+1)
+	def dec() = state.sendMap(_-1)
+	def current = state.current
+}
+
+object CounterState {
+	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
+		val counter = new CounterState()
+		var limit = n
+		while(limit > 0) {
+			counter.inc()
+			limit -= 1
+		}
+		counter.current
+	}
+
+	def runWithBackpressure(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
+		val counter = new CounterState()
+		def loop(i:Int): Future[Int] = {
+			if (i == 0) {
+				counter.current
+			} else {
+				counter.inc().flatMap { case () => loop(i-1) }
+			}
+		}
+		loop(n)
+	}
 }
 
 class PingPongActor()(implicit ec: ExecutionContext) {
@@ -128,7 +204,7 @@ object Pipeline {
 		len:Int,
 		bufLen: Int,
 		parallelism: Int,
-		timePerStep: Int,
+		timePerStep: Float,
 		jitter: Float
 	)(implicit ec: ExecutionContext): Future[Int] = {
 		val threadPool = Executors.newFixedThreadPool(parallelism)
@@ -159,8 +235,7 @@ object Pipeline {
 		def process(item: Option[Int]):Future[Option[Int]] = {
 			Future({
 				item.map { (item: Int) =>
-					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
-					Thread.sleep(timePerStep + jitterMs)
+					Sleep.jittered(timePerStep, jitter)
 					item + 1
 				}
 			})(workEc)
@@ -205,7 +280,7 @@ object Pipeline {
 		stages: Int,
 		len: Int,
 		parallelism: Int,
-		timePerStep: Int,
+		timePerStep: Float,
 		bufLen: Int,
 		jitter: Float
 	)(implicit sched: monix.execution.Scheduler):Future[Int] = {
@@ -221,9 +296,7 @@ object Pipeline {
 
 		def process(item: Int):Future[Int] = {
 			Future({
-				val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
-				Thread.sleep(timePerStep + jitterMs)
-				// println(s"processing batch ${item+1}")
+				Sleep.jittered(timePerStep, jitter)
 				item + 1
 			})(workEc)
 		}
@@ -247,7 +320,7 @@ object Pipeline {
 		stages: Int,
 		len: Int,
 		parallelism: Int,
-		timePerStep: Int,
+		timePerStep: Float,
 		bufLen: Int,
 		jitter: Float
 	)(implicit system: ActorSystem, materializer: Materializer):Future[Int] = {
@@ -274,9 +347,7 @@ object Pipeline {
 		def process(item: Option[Int]):Future[Option[Int]] = {
 			Future({
 				item.map { (item:Int) =>
-					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
-					Thread.sleep(timePerStep + jitterMs)
-					// println(s"processing batch ${item+1}")
+					Sleep.jittered(timePerStep, jitter)
 					item + 1
 				}
 			})(workEc)
@@ -412,13 +483,34 @@ object ActorExample {
 		// 		jitter = 0.5f
 		// 	))
 		// }
+		//
+		
+		import akka.actor.ActorSystem
+		implicit val actorSystem = ActorSystem("akka-example")
+		implicit val akkaMaterializer = ActorMaterializer()
+
+		val countLimit = 10000
+		repeat { time("akka counter . . .", CounterActor.run(countLimit)) }
+		repeat { time("seq counter . . .", CounterState.run(countLimit)) }
+		repeat { time("seq-backpressure counter . . .", CounterState.runWithBackpressure(countLimit)) }
 
 		// pipeline comparison:
-		val stages = 3
-		val len = 200
-		val parallelism = 3
-		val timePerStep = 1
-		val jitter = 0.5f
+		val stages = 8
+		val len = 2000
+		val parallelism = 8
+		val timePerStep = 0f
+		val jitter = 0.3f
+
+		repeat {
+			time(s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runAkka(
+				stages = stages,
+				len = len,
+				bufLen = bufLen,
+				parallelism = parallelism,
+				timePerStep = timePerStep,
+				jitter = jitter
+			))
+		}
 
 		repeat {
 			time(s"SequentialState: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.run(
@@ -443,19 +535,6 @@ object ActorExample {
 			))
 		}
 
-		import akka.actor.ActorSystem
-		implicit val actorSystem = ActorSystem("akka-example")
-		implicit val akkaMaterializer = ActorMaterializer()
-		repeat {
-			time(s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runAkka(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			))
-		}
 
 		println("Done - shutting down...")
 		threadPool.shutdown()

@@ -13,22 +13,15 @@ import scala.util._
 
 class SampleActorWordCount(implicit sched: ExecutionContext) {
 	val state = SequentialState(0)
-	def feed(line: String) = state.mutate { state =>
-		val old = state.get
-		state.set(state.get + line.split("\\w").length)
-	}
-
-	def reset() = state.mutate(_.set(0))
-	def get() = state.read(identity)
-	def print() = state.read(println)
+	def feed(line: String) = state.sendMap(_ + line.split("\\w").length)
+	def reset() = state.sendSet(0)
+	def current = state.current
 }
 
 class SampleCountingActor(bufLen: Int)(implicit ec: ExecutionContext) {
 	val state = SequentialState(bufLen = bufLen, v = 0)
-	def inc() = state.mutate { state =>
-		state.set(state.get + 1)
-	}
-	def get() = state.read(identity)
+	def inc() = state.sendMap(_ + 1)
+	def current = state.current
 }
 
 class PingPongActor(bufLen: Int)(implicit ec: ExecutionContext) {
@@ -37,21 +30,17 @@ class PingPongActor(bufLen: Int)(implicit ec: ExecutionContext) {
 	def setPeer(newPeer: PingPongActor) {
 		peer = newPeer
 	}
-	def ping(n: Int): Future[Future[Unit]] = {
-		val sent = state.mutate { state =>
-			state.set(n :: state.get)
-		}
-		sent.flatMap { (result:Future[Unit]) =>
+	def ping(n: Int): Future[Unit] = {
+		state.sendMap(n :: _).flatMap { (_:Unit) =>
 			if (n == 1) {
-				Future.successful(result)
+				Future.successful(())
 			} else {
-				val sent = peer.ping(n-1)
-				sent.map { (_:Future[Unit]) => Future.successful(()) }
+				peer.ping(n-1)
 			}
 		}
 	}
 
-	def get():Future[List[Int]] = state.read(identity).flatMap(identity)
+	def get:Future[List[Int]] = state.current
 }
 
 object PingPongActor {
@@ -60,8 +49,8 @@ object PingPongActor {
 		val b = new PingPongActor(bufLen)
 		a.setPeer(b)
 		b.setPeer(a)
-		a.ping(n).flatMap { (result:Future[Unit]) =>
-			a.get().zip(b.get()).map { case (a,b) => a.size + b.size }
+		a.ping(n).flatMap { (_:Unit) =>
+			a.get.zip(b.get).map { case (a,b) => a.size + b.size }
 		}
 	}
 }
@@ -97,7 +86,7 @@ class PipelineStage[T,R](
 						// we have some items to produce
 						val fut = handleCompleted(ret.toList)
 						state.outgoing = Some(fut)
-						fut.onComplete(_ => this.state.read { state =>
+						fut.onComplete(_ => this.state.awaitAccess { state =>
 							state.outgoing = None
 							// set up another drain when this outgoing batch is done
 							_drainCompleted(state)
@@ -109,12 +98,10 @@ class PipelineStage[T,R](
 		}
 	}
 
-	private def drainCompleted() {
-		state.read(_drainCompleted).flatMap(identity)
-	}
+	private def drainCompleted():Future[Unit] = state.sendAccess(_drainCompleted)
 
 	def enqueue(item: T):Future[Unit] = {
-		state.read { state =>
+		state.awaitAccess { state =>
 			_drainCompleted(state)
 
 			if (state.queue.size < bufLen) {
@@ -128,7 +115,7 @@ class PipelineStage[T,R](
 				state.queue.head.onComplete((_:Try[R]) => enqueue(item).foreach(promise.success))
 				promise.future
 			}
-		}.flatMap(identity).flatMap(identity)
+		}.flatMap(identity)
 	}
 }
 
@@ -148,21 +135,19 @@ object Pipeline {
 		val sink = SequentialState(bufLen, v = 0)
 		val drained = Promise[Int]()
 		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
-			sink.mutate { state =>
+			sink.awaitMap { current =>
 				val addition = batch.map(_.get.getOrElse(0)).sum
-				state.set(state.get + addition)
+				current + addition
 				// println(s"after batch $addition ($batch), size = ${state.get}")
-			}.flatMap { (done:Future[Unit]) =>
+			}.flatMap { (_:Unit) =>
 				if (batch.exists(_.get.isEmpty)) {
 					// read the final state
-					done.flatMap((_:Unit) =>
-						sink.read(identity).flatMap(identity).map { count =>
-							drained.success(count)
-							()
-						}
-					)
+					sink.current.map { count =>
+						drained.success(count)
+						()
+					}
 				} else {
-					done
+					Future.successful(())
 				}
 			}
 		}
@@ -285,12 +270,10 @@ object ActorExample {
 	def simpleCounter(bufLen: Int, limit: Int): Future[Int] = {
 		val lineCount = new SampleCountingActor(bufLen=bufLen)
 		def loop(i: Int): Future[Int] = {
-			lineCount.inc().flatMap { complete: Future[Unit] =>
+			lineCount.inc().flatMap { _: Unit =>
 				val nextI = i+1
 				if (nextI == limit) {
-					complete.flatMap { (_:Unit) =>
-						lineCount.get().flatMap(identity)
-					}
+					lineCount.current
 				} else {
 					loop(nextI)
 				}
@@ -305,19 +288,18 @@ object ActorExample {
 		def loop(): Future[(Int, Int)] = {
 			if (lines.hasNext) {
 				for {
-					numWords: Future[Unit] <- wordCounter.feed(lines.next())
-					numLines: Future[Unit] <- lineCount.inc()
+					_: Unit <- wordCounter.feed(lines.next())
+					_: Unit <- lineCount.inc()
 					// XXX potentially no need to wait until the last round?
 					// result <- numWords.zip(numLines).flatMap(_ => loop())
-						result <- (if (lines.hasNext) loop() else numWords.zip(numLines).flatMap(_ => loop()))
+					result <- loop()
 				} yield result
 			} else {
 //				println("final line!")
 				for {
-					words <- wordCounter.get()
-					lines <- lineCount.get()
-					result <- words.zip(lines)
-				} yield result
+					words <- wordCounter.current
+					lines <- lineCount.current
+				} yield (words, lines)
 			}
 		}
 

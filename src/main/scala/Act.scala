@@ -17,7 +17,7 @@ import scala.util.{Success, Try}
 
 class Ref[T](init:T) {
 	@volatile private var v = init
-	def get = v
+	def current = v
 	def set(updated:T) {
 		v = updated
 	}
@@ -33,17 +33,38 @@ class SequentialState[T](bufLen: Int, init: T, ec: ExecutionContext) {
 	private val state = new Ref(init)
 	private val thread = new Lwt(bufLen)(ec)
 
-	def mutate[R](fn: Function[Ref[T],R]):Future[Future[R]] = {
-		thread.enqueueAsync(() => fn(state))
-	}
+	// Naming:
+	//
+	//  - send*:    Enqueue an action, returning Future[Unit]. Once the future is resolved, the
+	//              action has been accepted by the worker, but not yet performed.
+	//
+	//  - *:        Perform an action and return its result. The future resolves once
+	//              the action is complete.
+	//
+	//  - raw*:     Perform an action, returning a Future[Future[T]]. The outer future
+	//              resolves once the task is enqueued (at which point futher tasks may
+	//              be enqueued). The inner future resolves once the task is completed.
+	//
+	// Action types:
+	//
+	// mutate(fn: Function[State[T],R]
+	// map(fn: Function[T,T])
+	// set(value: T)
+	// access: Function[T,T] -> accepts a mutable Ref for both reading and setting.
 
-	def set[R](updated: T):Future[Future[Unit]] = {
-		thread.enqueueAsync(() => state.set(updated))
-	}
+	// sendMutate: omitted; sendMap is just as functional
+	def sendMap(fn: Function[T,T]):             Future[Unit]         = thread.enqueueOnly(() => state.set(fn(state.current)))
+	def sendSet(updated: T):                    Future[Unit]         = thread.enqueueOnly(() => state.set(updated))
+	def sendAccess(fn: Function[T,_]):          Future[Unit]         = thread.enqueueOnly(() => fn(state.current))
 
-	def read[R](fn: Function[T,R]):Future[Future[R]] = {
-		thread.enqueueAsync(() => fn(state.get))
-	}
+	def awaitMutate[R](fn: Function[Ref[T],R]): Future[R]            = thread.enqueueReturn(() => fn(state))
+	def awaitMap[R](fn: Function[T,T]):         Future[Unit]         = thread.enqueueReturn(() => state.set(fn(state.current)))
+	def awaitSet[R](updated: T):                Future[Unit]         = thread.enqueueReturn(() => state.set(updated))
+	def awaitAccess[R](fn: Function[T,R]):      Future[R]            = thread.enqueueReturn(() => fn(state.current))
+	def current:                                Future[T]            = thread.enqueueReturn(() => state.current)
+
+	def rawMutate[R](fn: Function[Ref[T],R]):   Future[Future[R]]    = thread.enqueueAsync(() => fn(state))
+	def rawAccess[R](fn: Function[T,R]):        Future[Future[R]]    = thread.enqueueAsync(() => fn(state.current))
 }
 
 //// Supervisor strategy: I guess just have an uncaughtHandler per LWT?
@@ -202,7 +223,16 @@ class Lwt(bufLen: Int)(implicit ec: ExecutionContext) {
 
 	def enqueueSync[A](fun: Function0[A]): Future[A] = {
 		// TODO: reimplementing is probably more efficient
+		// TODO: do we even want this ability?
 		Await.result(enqueueAsync(fun), Duration.Inf)
+	}
+
+	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
+		enqueueAsync(fun).map((_:Future[R]) => ())
+	}
+
+	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
+		enqueueAsync(fun).flatMap(identity)
 	}
 
 	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {

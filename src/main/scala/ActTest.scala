@@ -144,13 +144,14 @@ object Pipeline {
 		val threadPool = Executors.newFixedThreadPool(parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
-		val source = Iterator.continually { () }.take(len - 1)
+		val source = Iterator.continually { 0 }.take(len)
 		val sink = SequentialState(bufLen, v = 0)
 		val drained = Promise[Int]()
-		def finalize(batch: List[Try[Option[Unit]]]): Future[Unit] = {
+		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
 			sink.mutate { state =>
-				state.set(state.get + batch.size)
-				// println("after batch " + batch + ", size = " + state.get)
+				val addition = batch.map(_.get.getOrElse(0)).sum
+				state.set(state.get + addition)
+				// println(s"after batch $addition ($batch), size = ${state.get}")
 			}.flatMap { (done:Future[Unit]) =>
 				if (batch.exists(_.get.isEmpty)) {
 					// read the final state
@@ -166,29 +167,29 @@ object Pipeline {
 			}
 		}
 
-		def process(item: Option[Unit]):Future[Option[Unit]] = {
+		def process(item: Option[Int]):Future[Option[Int]] = {
 			Future({
-				item.foreach { (_:Unit) =>
+				item.map { (item: Int) =>
 					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
 					Thread.sleep(timePerStep + jitterMs)
+					item + 1
 				}
-				item
 			})(workEc)
 		}
 
 		def connect(
-			sink: Function[List[Try[Option[Unit]]], Future[Unit]],
-			stages: Int):Function[List[Try[Option[Unit]]], Future[Unit]] =
+			sink: Function[List[Try[Option[Int]]], Future[Unit]],
+			stages: Int):Function[List[Try[Option[Int]]], Future[Unit]] =
 		{
 			val stage = new PipelineStage(bufLen, process, sink)
-			def handleBatch(batch: List[Try[Option[Unit]]]): Future[Unit] = {
+			def handleBatch(batch: List[Try[Option[Int]]]): Future[Unit] = {
 				batch.foldLeft(Future.successful(())) { (acc, item) =>
 					acc.flatMap { (_:Unit) =>
 						stage.enqueue(item.get)
 					}
 				}
 			}
-			if (stages == 0) {
+			if (stages == 1) {
 				handleBatch
 			} else {
 				connect(handleBatch, stages - 1)
@@ -237,17 +238,18 @@ object Pipeline {
 		// val promise = Promise[Int]()
 		val source: Source[Option[Int], NotUsed] = Source(1 to len).map(i => Some(0))
 		val sink = Sink.fold[Int,Option[Int]](0) { (i, token) =>
+			// println(s"after batch $token, size = ${i}")
 			i + token.getOrElse(0)
 		}
 
 		def process(item: Option[Int]):Future[Option[Int]] = {
 			Future({
-				item.foreach { (_:Int) =>
+				item.map { (item:Int) =>
 					val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
 					Thread.sleep(timePerStep + jitterMs)
+					// println(s"processing batch ${item+1}")
+					item + 1
 				}
-				// println(item.map(_+1))
-				item.map(_ + 1)
 			})(workEc)
 		}
 

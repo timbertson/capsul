@@ -10,6 +10,8 @@ import scala.concurrent.duration.Duration
 import scala.concurrent._
 import scala.util._
 
+import akka.actor.ActorSystem
+import akka.stream.{Materializer,ActorMaterializer}
 
 class SampleActorWordCount(implicit sched: ExecutionContext) {
 	val state = SequentialState(0)
@@ -31,7 +33,7 @@ class PingPongActor(bufLen: Int)(implicit ec: ExecutionContext) {
 		peer = newPeer
 	}
 	def ping(n: Int): Future[Unit] = {
-		state.sendMap(n :: _).flatMap { (_:Unit) =>
+		state.sendMap(n :: _).flatMap { case () =>
 			if (n == 1) {
 				Future.successful(())
 			} else {
@@ -49,7 +51,7 @@ object PingPongActor {
 		val b = new PingPongActor(bufLen)
 		a.setPeer(b)
 		b.setPeer(a)
-		a.ping(n).flatMap { (_:Unit) =>
+		a.ping(n).flatMap { case () =>
 			a.get.zip(b.get).map { case (a,b) => a.size + b.size }
 		}
 	}
@@ -139,7 +141,7 @@ object Pipeline {
 				val addition = batch.map(_.get.getOrElse(0)).sum
 				current + addition
 				// println(s"after batch $addition ($batch), size = ${state.get}")
-			}.flatMap { (_:Unit) =>
+			}.flatMap { case () =>
 				if (batch.exists(_.get.isEmpty)) {
 					// read the final state
 					sink.current.map { count =>
@@ -169,7 +171,7 @@ object Pipeline {
 			val stage = new PipelineStage(bufLen, process, sink)
 			def handleBatch(batch: List[Try[Option[Int]]]): Future[Unit] = {
 				batch.foldLeft(Future.successful(())) { (acc, item) =>
-					acc.flatMap { (_:Unit) =>
+					acc.flatMap { case () =>
 						stage.enqueue(item.get)
 					}
 				}
@@ -185,13 +187,13 @@ object Pipeline {
 		def pushWork():Future[Unit] = {
 			if (source.hasNext) {
 				val item = source.next
-				fullPipeline(List(Success(Some(item)))).flatMap((_:Unit) => pushWork())
+				fullPipeline(List(Success(Some(item)))).flatMap { case () => pushWork() }
 			} else {
 				fullPipeline(List(Success(None)))
 			}
 		}
 
-		pushWork().flatMap { (_:Unit) =>
+		pushWork().flatMap { case () =>
 			drained.future.onComplete( _ => threadPool.shutdown())
 			drained.future
 		}
@@ -204,18 +206,14 @@ object Pipeline {
 		timePerStep: Int,
 		bufLen: Int,
 		jitter: Float
-	):Future[Int] = {
+	)(implicit system: ActorSystem, materializer: Materializer):Future[Int] = {
 		import akka.stream._
 		import akka.stream.scaladsl._
 		import akka.{ NotUsed, Done }
-		import akka.actor.ActorSystem
 		import akka.util.ByteString
 		import scala.concurrent._
 		import scala.concurrent.duration._
 		import java.nio.file.Paths
-
-		implicit val system = ActorSystem("akka-example")
-		implicit val materializer = ActorMaterializer()
 
 		val threadPool = Executors.newFixedThreadPool(parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
@@ -251,7 +249,6 @@ object Pipeline {
 		val flow = connect(source, stages)
 
 		flow.toMat(sink)(Keep.right).run().map({ ret =>
-			system.terminate()
 			threadPool.shutdown()
 			ret
 		})(workEc)
@@ -381,6 +378,9 @@ object ActorExample {
 			))
 		}
 
+		import akka.actor.ActorSystem
+		implicit val actorSystem = ActorSystem("akka-example")
+		implicit val akkaMaterializer = ActorMaterializer()
 		repeat {
 			time("Akka-streams: n=4, t=3, x50 pipeline", Pipeline.runAkka(
 				stages = 4,
@@ -394,6 +394,7 @@ object ActorExample {
 
 		println("Done - shutting down...")
 		threadPool.shutdown()
+		actorSystem.terminate()
 	}
 }
 

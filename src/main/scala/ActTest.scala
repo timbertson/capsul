@@ -1,4 +1,3 @@
-import ThreadState.EnqueueResult
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
@@ -495,9 +494,9 @@ object ActorExample {
 		repeat { time("seq-backpressure counter . . .", CounterState.runWithBackpressure(countLimit)) }
 
 		// pipeline comparison:
-		val stages = 8
+		val stages = 6
 		val len = 2000
-		val parallelism = 8
+		val parallelism = 6
 		val timePerStep = 0f
 		val jitter = 0.3f
 

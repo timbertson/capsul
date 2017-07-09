@@ -199,14 +199,6 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-		enqueueAsync(fun).map((_:Future[R]) => ())
-	}
-
-	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
-		enqueueAsync(fun).flatMap(identity)
-	}
-
 	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {
 		// println(s"autoSchedule: $enqueueResult")
 		if(enqueueResult.shouldSchedule) {
@@ -216,7 +208,16 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		enqueueResult.success
 	}
 
+	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
+		enqueueAsync(fun).map((_:Future[R]) => ())
+	}
+
+	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
+		enqueueAsync(fun).flatMap(identity)
+	}
+
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
+		import ThreadState.EnqueueResult
 		// println("enqueueAsync() called")
 		val task = UnitOfWork(fun)
 

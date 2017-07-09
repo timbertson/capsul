@@ -76,6 +76,7 @@ class PipelineStage[T,R](
 			return
 		}
 
+		// pop off completed items, but only in order (i.e. stop at the first incomplete item)
 		val ret = new mutable.ListBuffer[Try[R]]()
 		while(true) {
 			state.queue.headOption match {
@@ -137,20 +138,21 @@ object Pipeline {
 		val sink = SequentialState(bufLen, v = 0)
 		val drained = Promise[Int]()
 		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
-			sink.awaitMap { current =>
+			val mapSent = sink.awaitMap { current =>
 				val addition = batch.map(_.get.getOrElse(0)).sum
 				current + addition
 				// println(s"after batch $addition ($batch), size = ${state.get}")
-			}.flatMap { case () =>
-				if (batch.exists(_.get.isEmpty)) {
-					// read the final state
-					sink.current.map { count =>
+			}
+
+			if (batch.exists(_.get.isEmpty)) {
+				// read the final state
+				mapSent.flatMap { case () =>
+					sink.awaitAccess { count =>
 						drained.success(count)
-						()
 					}
-				} else {
-					Future.successful(())
 				}
+			} else {
+				mapSent
 			}
 		}
 
@@ -197,6 +199,48 @@ object Pipeline {
 			drained.future.onComplete( _ => threadPool.shutdown())
 			drained.future
 		}
+	}
+
+	def runMonix(
+		stages: Int,
+		len: Int,
+		parallelism: Int,
+		timePerStep: Int,
+		bufLen: Int,
+		jitter: Float
+	)(implicit sched: monix.execution.Scheduler):Future[Int] = {
+
+		val threadPool = Executors.newFixedThreadPool(parallelism)
+		val workEc = ExecutionContext.fromExecutor(threadPool)
+
+		import monix.eval._
+		import monix.reactive._
+		import monix.reactive.OverflowStrategy.BackPressure
+
+		val source = Observable.fromIterator( Iterator.continually { 0 }.take(len) )
+
+		def process(item: Int):Future[Int] = {
+			Future({
+				val jitterMs = (Random.nextFloat() * (timePerStep.toFloat) * jitter).toInt
+				Thread.sleep(timePerStep + jitterMs)
+				// println(s"processing batch ${item+1}")
+				item + 1
+			})(workEc)
+		}
+
+		def connect(obs: Observable[Int], stages: Int): Observable[Int] = {
+			if (stages == 0) return obs
+			connect(obs, stages - 1).map(process)
+				.asyncBoundary(OverflowStrategy.BackPressure(bufLen))
+				.mapFuture(identity)
+		}
+
+		val pipeline = connect(source, stages)
+		val sink = pipeline.consumeWith(Consumer.foldLeft(0)(_ + _))
+
+		val ret = sink.runAsync
+		ret.onComplete { (_:Try[Int]) => threadPool.shutdown() }
+		ret
 	}
 
 	def runAkka(
@@ -369,6 +413,18 @@ object ActorExample {
 
 		repeat {
 			time("SequentialState: n=4, t=3, x50 pipeline", Pipeline.run(
+				stages = 4,
+				len = 50,
+				bufLen = bufLen,
+				parallelism = 4,
+				timePerStep = 3,
+				jitter = 0.5f
+			))
+		}
+
+		implicit val monixScheduler = monix.execution.Scheduler(ec)
+		repeat {
+			time("Monix: n=4, t=3, x50 pipeline", Pipeline.runMonix(
 				stages = 4,
 				len = 50,
 				bufLen = bufLen,

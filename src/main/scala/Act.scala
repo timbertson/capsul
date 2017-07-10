@@ -121,12 +121,10 @@ object ThreadState {
 		if (state.tasks.isEmpty) {
 			state.park()
 		} else {
-			var (task, tasks) = state.tasks.dequeue
-			var waitIdx = state.waitIdx
-			if (state.hasWaiters) {
-				waitIdx = state.waitIdx + 1
-			}
-      new ThreadState(tasks, state.waiters, waitIdx, state.running)
+			val tasks = state.tasks.tail
+//			assert(!state.skipOneWaiter)
+			val skipOneWaiter = state.waiters.nonEmpty
+      new ThreadState(tasks, state.waiters, skipOneWaiter, state.running)
 		}
 	}
 
@@ -148,51 +146,57 @@ object ThreadState {
 //		}
 //	}
 
-		def popWaiter(state: ThreadState):(Option[Waiter[_]],ThreadState) = {
-			if (state.waitIdx > 0) {
-				val (head, tail) = state.waiters.dequeue
-				(Some(head), new ThreadState(state.tasks.enqueue(head.task), tail, state.waitIdx - 1, state.running))
-			} else {
-				(None, state)
-			}
-		}
+//		def popWaiter(state: ThreadState):(Waiter[_],ThreadState) = {
+////			assert(state.waitIdx == 1)
+//      val (head, tail) = state.waiters.dequeue
+//			(head, new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running))
+//		}
 
-	val empty = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], 0, false)
+	def popWaiter(state: ThreadState):ThreadState = {
+		if (state.waiterInLimbo) {
+			val (head, tail) = state.waiters.dequeue
+			new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running)
+		} else {
+			state
+		}
+	}
+
+	val empty = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], false, false)
 
 	def start(state: ThreadState): (Boolean, ThreadState) = {
-		(!state.running, new ThreadState(state.tasks, state.waiters, state.waitIdx, true))
+		(!state.running, new ThreadState(state.tasks, state.waiters, state.waiterInLimbo, true))
 	}
 }
 
 class ThreadState(
 	val tasks: Queue[UnitOfWork[_]],
 	val waiters: Queue[Waiter[_]],
-	val waitIdx: Int,
+	val waiterInLimbo: Boolean, // true if the first waiter is about to be placed onto `tasks.
 	val running: Boolean
 ) {
-	def hasWaiters = if (waitIdx == 0) waiters.nonEmpty else waiters.length > waitIdx
-	def hasSpace(capacity: Int) = tasks.length + waitIdx < capacity
-	def firstWaiter = waiters(waitIdx)
+	def hasWaiters:Boolean = {
+		if (waiters.isEmpty) return false
+    if (waiterInLimbo) waiters.tail.nonEmpty else waiters.nonEmpty
+	}
+	def hasSpace(capacity: Int) = tasks.length < (if (waiterInLimbo) capacity - 1 else capacity)
 
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
-		// enqueues a task, also drops waiters once they reach a limit
-		var newWaiters = waiters
-		var newWaitIdx = waitIdx
-//		if (waitIdx > 10) {
-//      newWaiters = waiters.drop(waitIdx)
-//      newWaitIdx = 0
-//		}
-		new ThreadState(tasks.enqueue(task), newWaiters, newWaitIdx, true)
+		// note: must enqueue _after_ any limbo waiting task
+    if (waiterInLimbo) {
+			val (head, tail) = waiters.dequeue
+			new ThreadState(tasks.enqueue(head.task), tail, false, running)
+    }
+		new ThreadState(tasks.enqueue(task), waiters, waiterInLimbo, true)
 	}
 
 	def enqueueWaiter(waiter: Waiter[_]): ThreadState = {
 		// assert(running)
-		new ThreadState(tasks, waiters.enqueue(waiter), waitIdx, running)
+		new ThreadState(tasks, waiters.enqueue(waiter), waiterInLimbo, running)
 	}
 
 	def park() = {
 		// assert(running)
-		new ThreadState(tasks, waiters, waitIdx, false)
+		new ThreadState(tasks, waiters, waiterInLimbo, false)
 	}
 }
 
@@ -245,13 +249,11 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					// evaluate the task on this fiber
 					oldState.tasks.head.run()
 
-					val waiter = state.transformAndExtract(ThreadState.popWaiter)
-					waiter.foreach(_.enqueued())
-
-//					// we _may_ have popped a waiter too:
-//					if (oldState.hasWaiters) {
-//						oldState.firstWaiter.enqueued()
-//					}
+//					assert(!oldState.skipOneWaiter)
+					oldState.waiters.headOption.foreach { waiter =>
+            state.transform(ThreadState.popWaiter)
+            waiter.enqueued()
+					}
 
           if (maxIterations == 0) {
             // re-enqueue the runnable instead of looping to prevent starvation

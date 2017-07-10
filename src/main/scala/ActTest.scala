@@ -419,7 +419,7 @@ object ActorExample {
 		loop()
 	}
 
-	def time(name:String, impl: => Future[_]) = {
+	def time(name: String, impl: => Future[_]):(Int,_) = {
 		val start = System.currentTimeMillis()
 		// println("Start")
 		val f = impl
@@ -430,16 +430,25 @@ object ActorExample {
 		val end = System.currentTimeMillis()
 		val duration = end - start
 		// println("Done")
-		println(s"implementation $name took $duration ms to calculate $result")
+		(duration.toInt, result)
 	}
 
-	def repeat(n: Int)(f: => Unit) {
+	def repeat(n: Int)(name: String, f: => Future[_]) {
 		var attempt = n
+		var accum:Int = 0
 		while(attempt>0) {
-			f
+			val (cost,result) = time(name, f)
+			if (attempt == n - 1) {
+				println(s"   $name: took $cost ms to calculate $result")
+			}
+			if (attempt < n) {
+				accum += cost
+			}
 			attempt -= 1
 			Thread.sleep(10)
 		}
+		val avg = accum.toFloat / (n-1).toFloat
+		println(s"=> avg ${avg}")
 	}
 
 	def run(): Unit = {
@@ -490,9 +499,9 @@ object ActorExample {
 		implicit val akkaMaterializer = ActorMaterializer()
 
 		val countLimit = 10000
-		repeat { time("akka counter . . .", CounterActor.run(countLimit)) }
-		repeat { time("seq counter . . .", CounterState.run(countLimit)) }
-		repeat { time("seq-backpressure counter . . .", CounterState.runWithBackpressure(countLimit)) }
+		repeat("akka counter", CounterActor.run(countLimit))
+		repeat("seq counter", CounterState.run(countLimit))
+		repeat("seq-backpressure counter", CounterState.runWithBackpressure(countLimit))
 
 		// pipeline comparison:
 		val stages = 6
@@ -501,39 +510,33 @@ object ActorExample {
 		val timePerStep = 0f
 		val jitter = 0.3f
 
-		repeat {
-			time(s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runAkka(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			))
-		}
+		repeat(s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runAkka(
+      stages = stages,
+      len = len,
+      bufLen = bufLen,
+      parallelism = parallelism,
+      timePerStep = timePerStep,
+      jitter = jitter
+    ))
 
-		repeat {
-			time(s"SequentialState: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.run(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			))
-		}
+		repeat(s"SequentialState: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.run(
+      stages = stages,
+      len = len,
+      bufLen = bufLen,
+      parallelism = parallelism,
+      timePerStep = timePerStep,
+      jitter = jitter
+    ))
 
 		implicit val monixScheduler = monix.execution.Scheduler(ec)
-		repeat {
-			time(s"Monix: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runMonix(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			))
-		}
+		repeat(s"Monix: n=$parallelism, t=$timePerStep, x$len pipeline", Pipeline.runMonix(
+      stages = stages,
+      len = len,
+      bufLen = bufLen,
+      parallelism = parallelism,
+      timePerStep = timePerStep,
+      jitter = jitter
+    ))
 
 
 		println("Done - shutting down...")

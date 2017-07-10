@@ -66,9 +66,19 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 //// Supervisor strategy: I guess just have an uncaughtHandler per thread?
 //// You should be using Try instead of exceptions anyway...
 
-case class UnitOfWork[A](fn: Function0[A]) {
+case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 	val promise = Promise[A]()
 	def future = promise.future
+
+	def tryEnqueue(state:ThreadState) = {
+		if (state.hasSpace(bufLen)) {
+			(EnqueueResult.successful(state.running), state.enqueueTask(this))
+		} else {
+			// assert(state.running, "thread is full but not running!")
+			(EnqueueResult.rejected, state)
+		}
+	}
+
 	def run() = {
 		try {
 			promise.success(fn())
@@ -107,48 +117,82 @@ object ThreadState {
 	}
 
 
-	def popTask(state: ThreadState):(Option[UnitOfWork[_]],ThreadState) = {
+	def popTask(state: ThreadState):ThreadState = {
 		if (state.tasks.isEmpty) {
-			(None, state.park())
+			state.park()
 		} else {
-			val (head, tail) = state.tasks.dequeue
-			(Some(head), new ThreadState(tail, state.waiters, state.running))
+			var (task, tasks) = state.tasks.dequeue
+			var waitIdx = state.waitIdx
+			if (state.hasWaiters) {
+				waitIdx = state.waitIdx + 1
+			}
+      new ThreadState(tasks, state.waiters, waitIdx, state.running)
 		}
 	}
 
-	def popWaiter(bufLen: Int)(state: ThreadState):(Option[Waiter[_]],ThreadState) = {
-		if (state.waiters.isEmpty || state.tasks.size >= bufLen) {
-			(None, state)
-		} else {
-			val (head, tail) = state.waiters.dequeue
-			(Some(head), new ThreadState(state.tasks.enqueue(head.task), tail, state.running))
-		}
-	}
+//	def popTasks(state: ThreadState):(Option[ (Queue[UnitOfWork[_]], Queue[Waiter[_]]) ],ThreadState) = {
+//		if (state.tasks.isEmpty) {
+//			(None, state.park())
+//		} else {
+//			val (poppedWaiters, remainingWaiters) = state.waiters.splitAt(state.tasks.length)
+//			(Some((state.tasks, poppedWaiters)), new ThreadState(Queue.empty, remainingWaiters, state.running))
+//		}
+//	}
 
-	def empty = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], false)
+//	def popWaiter(bufLen: Int)(state: ThreadState):(Option[Waiter[_]],ThreadState) = {
+//		if (state.waiters.isEmpty || state.tasks.size >= bufLen) {
+//			(None, state)
+//		} else {
+//			val (head, tail) = state.waiters.dequeue
+//			(Some(head), new ThreadState(state.tasks.enqueue(head.task), tail, state.running))
+//		}
+//	}
+
+		def popWaiter(state: ThreadState):(Option[Waiter[_]],ThreadState) = {
+			if (state.waitIdx > 0) {
+				val (head, tail) = state.waiters.dequeue
+				(Some(head), new ThreadState(state.tasks.enqueue(head.task), tail, state.waitIdx - 1, state.running))
+			} else {
+				(None, state)
+			}
+		}
+
+	val empty = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], 0, false)
 
 	def start(state: ThreadState): (Boolean, ThreadState) = {
-		(!state.running, new ThreadState(state.tasks, state.waiters, true))
+		(!state.running, new ThreadState(state.tasks, state.waiters, state.waitIdx, true))
 	}
 }
 
-class ThreadState(val tasks: Queue[UnitOfWork[_]], val waiters: Queue[Waiter[_]], val running: Boolean) {
-	import ThreadState._
+class ThreadState(
+	val tasks: Queue[UnitOfWork[_]],
+	val waiters: Queue[Waiter[_]],
+	val waitIdx: Int,
+	val running: Boolean
+) {
+	def hasWaiters = if (waitIdx == 0) waiters.nonEmpty else waiters.length > waitIdx
+	def hasSpace(capacity: Int) = tasks.length + waitIdx < capacity
+	def firstWaiter = waiters(waitIdx)
 
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
-		new ThreadState(tasks.enqueue(task), waiters, true)
+		// enqueues a task, also drops waiters once they reach a limit
+		var newWaiters = waiters
+		var newWaitIdx = waitIdx
+//		if (waitIdx > 10) {
+//      newWaiters = waiters.drop(waitIdx)
+//      newWaitIdx = 0
+//		}
+		new ThreadState(tasks.enqueue(task), newWaiters, newWaitIdx, true)
 	}
 
 	def enqueueWaiter(waiter: Waiter[_]): ThreadState = {
 		// assert(running)
-		new ThreadState(tasks, waiters.enqueue(waiter), running)
+		new ThreadState(tasks, waiters.enqueue(waiter), waitIdx, running)
 	}
-
-	def length = tasks.length
 
 	def park() = {
 		// assert(running)
-		new ThreadState(tasks, waiters, false)
+		new ThreadState(tasks, waiters, waitIdx, false)
 	}
 }
 
@@ -158,6 +202,17 @@ class Waiter[A](
 	def enqueued() {
 		promise.success(task.future)
 	}
+	def isEnqueued = promise.isCompleted
+
+	def enqueue(state:ThreadState) = {
+		if (state.hasSpace(task.bufLen)) {
+			(EnqueueResult.successful(state.running), state.enqueueTask(task))
+		} else {
+			// assert(state.running, "state should be running!")
+			(EnqueueResult.rejected, state.enqueueWaiter(this))
+		}
+	}
+
 }
 
 object SequentialExecutor {
@@ -168,31 +223,42 @@ object SequentialExecutor {
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val state = Atomic(ThreadState.empty)
 
+	def logCallCount[A,B](fn:Function[A,B]):Function[A,B] = {
+		var count = 0
+		(a) => {
+			count += 1
+			if (count>10) println("."+count)
+			fn(a)
+		}
+	}
+
+
 	val workLoop:Runnable = new Runnable() {
 		// println("running")
-		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
+//		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
 		def run() {
 			@tailrec def loop(maxIterations: Int): Unit = {
-				val task = state.transformAndExtract(ThreadState.popTask)
-				task match {
-					case None => ()
-					case Some(task) => {
-						// evaluate this function on this fiber
-						task.run()
+				val oldState:ThreadState = state.getAndTransform(ThreadState.popTask)
 
-						// and promote a waiting task, if any
-						state.transformAndExtract(popWaiter).foreach { waiter =>
-							// println("popped a waiter!")
-							waiter.enqueued()
-						}
+				if (oldState.tasks.nonEmpty) {
+					// we popped a task!
+					// evaluate the task on this fiber
+					oldState.tasks.head.run()
 
-						if (maxIterations == 0) {
-							// re-enqueue the runnable instead of looping to prevent starvation
-							ec.execute(workLoop)
-						} else {
-							loop(maxIterations - 1)
-						}
-					}
+					val waiter = state.transformAndExtract(ThreadState.popWaiter)
+					waiter.foreach(_.enqueued())
+
+//					// we _may_ have popped a waiter too:
+//					if (oldState.hasWaiters) {
+//						oldState.firstWaiter.enqueued()
+//					}
+
+          if (maxIterations == 0) {
+            // re-enqueue the runnable instead of looping to prevent starvation
+            ec.execute(workLoop)
+          } else {
+            loop(maxIterations - 1)
+          }
 				}
 			}
 			loop(200)
@@ -219,17 +285,10 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
 		import ThreadState.EnqueueResult
 		// println("enqueueAsync() called")
-		val task = UnitOfWork(fun)
+		val task = UnitOfWork(fun, bufLen)
 
 		// try an immediate enqueue:
-		val done = autoSchedule(state.transformAndExtract { state =>
-			if (state.tasks.length < bufLen) {
-				(EnqueueResult.successful(state.running), state.enqueueTask(task))
-			} else {
-				// assert(state.running, "thread is full but not running!")
-				(EnqueueResult.rejected, state)
-			}
-		})
+		val done = autoSchedule(state.transformAndExtract(task.tryEnqueue))
 
 		if (done) {
 			//easy mode:
@@ -240,14 +299,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// tasks is (still) full
 			val enqueued = Promise[Future[A]]()
 			val waiter = new Waiter[A](task, enqueued)
-			val done = autoSchedule(state.transformAndExtract { state =>
-				if (state.length < bufLen) {
-					(EnqueueResult.successful(state.running), state.enqueueTask(task))
-				} else {
-					// assert(state.running, "state should be running!")
-					(EnqueueResult.rejected, state.enqueueWaiter(waiter))
-				}
-			})
+
+			val done = autoSchedule(state.transformAndExtract(waiter.enqueue))
 			if (done) {
 				waiter.enqueued()
 			}

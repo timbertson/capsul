@@ -427,6 +427,9 @@ object ActorExample {
 		val result = Try {
 			Await.result(f(), Duration(3, TimeUnit.SECONDS))
 		}
+		if (result.isFailure) {
+			println(result)
+		}
 		val end = System.currentTimeMillis()
 		val duration = end - start
 		// println("Done")

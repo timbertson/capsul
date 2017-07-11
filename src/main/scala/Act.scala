@@ -1,6 +1,5 @@
 import java.nio.charset.Charset
 
-import ThreadState.EnqueueResult
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
@@ -71,11 +70,11 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 	def future = promise.future
 
 	def tryEnqueue(state:ThreadState) = {
-		if (state.hasSpace(bufLen)) {
-			(EnqueueResult.successful(state.running), state.enqueueTask(this))
+		if (state.hasSpace) {
+			state.enqueueTask(this)
 		} else {
 			// assert(state.running, "thread is full but not running!")
-			(EnqueueResult.rejected, state)
+			state
 		}
 	}
 
@@ -96,25 +95,25 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 
 
 object ThreadState {
-	class EnqueueResult(val success: Boolean, val wasRunning: Boolean) {
-		def shouldSchedule = success && !wasRunning
-		override def toString() = {
-			s"EnqueueResult(success=$success, wasRunning=$wasRunning)"
-		}
-	}
-
-	// pre-bind the combinations we need
-	val ENQUEUED_ALREADY_RUNNING = new EnqueueResult(success = true, wasRunning = true)
-	val ENQUEUED_NOT_RUNNING = new EnqueueResult(success = true, wasRunning = false)
-	val ENQUEUE_REJECTED = new EnqueueResult(success = false, wasRunning = true)
-
-	object EnqueueResult {
-		def successful(running: Boolean) = {
-			if (running) ENQUEUED_ALREADY_RUNNING else ENQUEUED_NOT_RUNNING
-		}
-
-		def rejected = ENQUEUE_REJECTED
-	}
+//	class EnqueueResult(val success: Boolean, val wasRunning: Boolean) {
+//		def shouldSchedule = success && !wasRunning
+//		override def toString() = {
+//			s"EnqueueResult(success=$success, wasRunning=$wasRunning)"
+//		}
+//	}
+//
+//	// pre-bind the combinations we need
+//	val ENQUEUED_ALREADY_RUNNING = new EnqueueResult(success = true, wasRunning = true)
+//	val ENQUEUED_NOT_RUNNING = new EnqueueResult(success = true, wasRunning = false)
+//	val ENQUEUE_REJECTED = new EnqueueResult(success = false, wasRunning = true)
+//
+//	object EnqueueResult {
+//		def successful(running: Boolean) = {
+//			if (running) ENQUEUED_ALREADY_RUNNING else ENQUEUED_NOT_RUNNING
+//		}
+//
+//		def rejected = ENQUEUE_REJECTED
+//	}
 
 
 	def popTask(state: ThreadState):ThreadState = {
@@ -124,7 +123,8 @@ object ThreadState {
 			val tasks = state.tasks.tail
 //			assert(!state.skipOneWaiter)
 			val skipOneWaiter = state.waiters.nonEmpty
-      new ThreadState(tasks, state.waiters, skipOneWaiter, state.running)
+			val capacity = if (skipOneWaiter) state.capacity else state.capacity + 1
+      new ThreadState(tasks, state.waiters, skipOneWaiter, state.running, capacity)
 		}
 	}
 
@@ -152,19 +152,19 @@ object ThreadState {
 //			(head, new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running))
 //		}
 
-	def popWaiter(state: ThreadState):ThreadState = {
+	def promoteWaiter(state: ThreadState):ThreadState = {
 		if (state.waiterInLimbo) {
 			val (head, tail) = state.waiters.dequeue
-			new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running)
+			new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running, state.capacity)
 		} else {
 			state
 		}
 	}
 
-	val empty = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], false, false)
+	def empty(capacity: Int) = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], false, false, capacity)
 
 	def start(state: ThreadState): (Boolean, ThreadState) = {
-		(!state.running, new ThreadState(state.tasks, state.waiters, state.waiterInLimbo, true))
+		(!state.running, new ThreadState(state.tasks, state.waiters, state.waiterInLimbo, true, state.capacity))
 	}
 }
 
@@ -172,31 +172,34 @@ class ThreadState(
 	val tasks: Queue[UnitOfWork[_]],
 	val waiters: Queue[Waiter[_]],
 	val waiterInLimbo: Boolean, // true if the first waiter is about to be placed onto `tasks.
-	val running: Boolean
+	val running: Boolean,
+	val capacity: Int
 ) {
+
 	def hasWaiters:Boolean = {
 		if (waiters.isEmpty) return false
     if (waiterInLimbo) waiters.tail.nonEmpty else waiters.nonEmpty
 	}
-	def hasSpace(capacity: Int) = tasks.length < (if (waiterInLimbo) capacity - 1 else capacity)
+
+	def hasSpace = capacity > 0
 
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
 		// note: must enqueue _after_ any limbo waiting task
     if (waiterInLimbo) {
 			val (head, tail) = waiters.dequeue
-			new ThreadState(tasks.enqueue(head.task), tail, false, running)
+			new ThreadState(tasks.enqueue(head.task), tail, false, running, capacity)
     }
-		new ThreadState(tasks.enqueue(task), waiters, waiterInLimbo, true)
+		new ThreadState(tasks.enqueue(task), waiters, waiterInLimbo, true, capacity-1)
 	}
 
 	def enqueueWaiter(waiter: Waiter[_]): ThreadState = {
 		// assert(running)
-		new ThreadState(tasks, waiters.enqueue(waiter), waiterInLimbo, running)
+		new ThreadState(tasks, waiters.enqueue(waiter), waiterInLimbo, running, capacity)
 	}
 
 	def park() = {
 		// assert(running)
-		new ThreadState(tasks, waiters, waiterInLimbo, false)
+		new ThreadState(tasks, waiters, waiterInLimbo, false, capacity)
 	}
 }
 
@@ -209,11 +212,11 @@ class Waiter[A](
 	def isEnqueued = promise.isCompleted
 
 	def enqueue(state:ThreadState) = {
-		if (state.hasSpace(task.bufLen)) {
-			(EnqueueResult.successful(state.running), state.enqueueTask(task))
+		if (state.hasSpace) {
+			state.enqueueTask(task)
 		} else {
 			// assert(state.running, "state should be running!")
-			(EnqueueResult.rejected, state.enqueueWaiter(this))
+			state.enqueueWaiter(this)
 		}
 	}
 
@@ -225,7 +228,7 @@ object SequentialExecutor {
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private val state = Atomic(ThreadState.empty)
+	private val state = Atomic(ThreadState.empty(bufLen))
 
 	def logCallCount[A,B](fn:Function[A,B]):Function[A,B] = {
 		var count = 0
@@ -251,7 +254,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 //					assert(!oldState.skipOneWaiter)
 					oldState.waiters.headOption.foreach { waiter =>
-            state.transform(ThreadState.popWaiter)
+            state.transform(ThreadState.promoteWaiter)
             waiter.enqueued()
 					}
 
@@ -267,17 +270,23 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {
-		// println(s"autoSchedule: $enqueueResult")
-		if(enqueueResult.shouldSchedule) {
-			// println("scheduling parked thread")
+	private def autoSchedule(previousState: ThreadState) = {
+		if(!previousState.running) {
 			ec.execute(workLoop)
 		}
-		enqueueResult.success
 	}
 
+//	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {
+//		// println(s"autoSchedule: $enqueueResult")
+//		if(enqueueResult.shouldSchedule) {
+//			// println("scheduling parked thread")
+//			ec.execute(workLoop)
+//		}
+//		enqueueResult.success
+//	}
+
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-		enqueueAsync(fun).map((_:Future[R]) => ())
+	enqueueAsync(fun).map((_:Future[R]) => ())
 	}
 
 	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
@@ -285,15 +294,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		import ThreadState.EnqueueResult
 		// println("enqueueAsync() called")
 		val task = UnitOfWork(fun, bufLen)
 
 		// try an immediate enqueue:
-		val done = autoSchedule(state.transformAndExtract(task.tryEnqueue))
-
-		if (done) {
-			//easy mode:
+		val prevState = state.getAndTransform(task.tryEnqueue)
+		if (prevState.hasSpace) {
+			// easy mode: tryEnqueue has enqueued the task already
+			autoSchedule(prevState)
 			// println("enqueueAsync completed immediately")
 			Future.successful(task.future)
 		} else {
@@ -302,8 +310,10 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			val enqueued = Promise[Future[A]]()
 			val waiter = new Waiter[A](task, enqueued)
 
-			val done = autoSchedule(state.transformAndExtract(waiter.enqueue))
-			if (done) {
+			val prevState = state.getAndTransform(waiter.enqueue)
+			autoSchedule(prevState)
+			if (prevState.hasSpace) {
+				// we queued a task (not a waiter)
 				waiter.enqueued()
 			}
 			enqueued.future

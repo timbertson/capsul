@@ -67,16 +67,34 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 
 case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 	val promise = Promise[A]()
+	var enqueuedPromise:Promise[Future[A]] = null
 	def future = promise.future
 
+	def makeEnqueueable(): Unit = {
+		enqueuedPromise = Promise()
+	}
+
 	def tryEnqueue(state:ThreadState) = {
-		if (state.hasSpace) {
+		if (state.hasSpace(bufLen)) {
 			state.enqueueTask(this)
 		} else {
 			// assert(state.running, "thread is full but not running!")
 			state
 		}
 	}
+
+	def enqueue(state:ThreadState) = {
+		if (state.hasSpace(bufLen)) {
+      state.enqueueTask(this)
+		} else {
+      state.enqueueWaiter(this)
+		}
+	}
+
+	def enqueued() {
+		enqueuedPromise.success(future)
+	}
+
 
 	def run() = {
 		try {
@@ -120,11 +138,14 @@ object ThreadState {
 		if (state.tasks.isEmpty) {
 			state.park()
 		} else {
-			val tasks = state.tasks.tail
-//			assert(!state.skipOneWaiter)
-			val skipOneWaiter = state.waiters.nonEmpty
-			val capacity = if (skipOneWaiter) state.capacity else state.capacity + 1
-      new ThreadState(tasks, state.waiters, skipOneWaiter, state.running, capacity)
+			var numTasks = state.numTasks
+			var numWaiters = state.numWaiters
+			if (state.hasWaiters) {
+				numWaiters -= 1
+			} else {
+				numTasks -= 1
+			}
+      new ThreadState(state.tasks.tail, state.running, numTasks, numWaiters)
 		}
 	}
 
@@ -152,74 +173,49 @@ object ThreadState {
 //			(head, new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running))
 //		}
 
-	def promoteWaiter(state: ThreadState):ThreadState = {
-		if (state.waiterInLimbo) {
-			val (head, tail) = state.waiters.dequeue
-			new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running, state.capacity)
-		} else {
-			state
-		}
-	}
+//	def promoteWaiter(state: ThreadState):ThreadState = {
+//		if (state.waiterInLimbo) {
+//			val (head, tail) = state.waiters.dequeue
+//			new ThreadState(state.tasks.enqueue(head.task), tail, state.running, state.capacity)
+//		} else {
+//			state
+//		}
+//	}
 
-	def empty(capacity: Int) = new ThreadState(Queue.empty[UnitOfWork[_]], Queue.empty[Waiter[_]], false, false, capacity)
+	def empty(capacity: Int) = new ThreadState(Queue.empty[UnitOfWork[_]], false, 0, 0)
 
 	def start(state: ThreadState): (Boolean, ThreadState) = {
-		(!state.running, new ThreadState(state.tasks, state.waiters, state.waiterInLimbo, true, state.capacity))
+		(!state.running, new ThreadState(state.tasks, true, state.numTasks, state.numWaiters))
 	}
 }
 
-class ThreadState(
-	val tasks: Queue[UnitOfWork[_]],
-	val waiters: Queue[Waiter[_]],
-	val waiterInLimbo: Boolean, // true if the first waiter is about to be placed onto `tasks.
-	val running: Boolean,
-	val capacity: Int
-) {
+class ThreadState(val tasks: Queue[UnitOfWork[_]], val running: Boolean, val numTasks: Int, val numWaiters: Int) {
 
-	def hasWaiters:Boolean = {
-		if (waiters.isEmpty) return false
-    if (waiterInLimbo) waiters.tail.nonEmpty else waiters.nonEmpty
+	def hasWaiters:Boolean = numWaiters > 0
+
+	def waiter: Option[UnitOfWork[_]] = {
+		// tasks is [Task, Task, ..., <Waiter>, ...]
+		// where the first waiter is at index `numTasks`
+		if (numWaiters == 0) None
+		else Some(tasks(numTasks))
 	}
 
-	def hasSpace = capacity > 0
+	def hasSpace(capacity: Int) = numTasks < capacity
 
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
-		// note: must enqueue _after_ any limbo waiting task
-    if (waiterInLimbo) {
-			val (head, tail) = waiters.dequeue
-			new ThreadState(tasks.enqueue(head.task), tail, false, running, capacity)
-    }
-		new ThreadState(tasks.enqueue(task), waiters, waiterInLimbo, true, capacity-1)
+		assert(numWaiters == 0)
+		new ThreadState(tasks.enqueue(task), true, numTasks + 1, numWaiters)
 	}
 
-	def enqueueWaiter(waiter: Waiter[_]): ThreadState = {
-		// assert(running)
-		new ThreadState(tasks, waiters.enqueue(waiter), waiterInLimbo, running, capacity)
+	def enqueueWaiter(task: UnitOfWork[_]): ThreadState = {
+//		assert(running)
+		new ThreadState(tasks.enqueue(task), running, numTasks, numWaiters + 1)
 	}
 
 	def park() = {
 		// assert(running)
-		new ThreadState(tasks, waiters, waiterInLimbo, false, capacity)
+		new ThreadState(tasks, false, numTasks, numWaiters)
 	}
-}
-
-class Waiter[A](
-	val task: UnitOfWork[A],
-	promise: Promise[Future[A]]) {
-	def enqueued() {
-		promise.success(task.future)
-	}
-	def isEnqueued = promise.isCompleted
-
-	def enqueue(state:ThreadState) = {
-		if (state.hasSpace) {
-			state.enqueueTask(task)
-		} else {
-			// assert(state.running, "state should be running!")
-			state.enqueueWaiter(this)
-		}
-	}
-
 }
 
 object SequentialExecutor {
@@ -253,8 +249,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					oldState.tasks.head.run()
 
 //					assert(!oldState.skipOneWaiter)
-					oldState.waiters.headOption.foreach { waiter =>
-            state.transform(ThreadState.promoteWaiter)
+					oldState.waiter.foreach { waiter =>
             waiter.enqueued()
 					}
 
@@ -299,7 +294,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 		// try an immediate enqueue:
 		val prevState = state.getAndTransform(task.tryEnqueue)
-		if (prevState.hasSpace) {
+		if (prevState.hasSpace(bufLen)) {
 			// easy mode: tryEnqueue has enqueued the task already
 			autoSchedule(prevState)
 			// println("enqueueAsync completed immediately")
@@ -308,15 +303,15 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// slow mode: make a promise and hop in the waiting queue if
 			// tasks is (still) full
 			val enqueued = Promise[Future[A]]()
-			val waiter = new Waiter[A](task, enqueued)
+			task.enqueuedPromise = enqueued
 
-			val prevState = state.getAndTransform(waiter.enqueue)
+			val prevState = state.getAndTransform(task.enqueue)
 			autoSchedule(prevState)
-			if (prevState.hasSpace) {
+			if (prevState.hasSpace(bufLen)) {
 				// we queued a task (not a waiter)
-				waiter.enqueued()
+				task.enqueued()
 			}
-			enqueued.future
+			task.enqueuedPromise.future
 		}
 	}
 }

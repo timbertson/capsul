@@ -117,7 +117,7 @@ object ExampleMain {
 	def main() {
 		val system = ActorSystem("akka-example")
 		val lines = List("fdsf  fdfkdsh fhsdjk", "fdj fjfgh dfkgh fd", "gfdfhgjkdf hgfgdf df gdf gfd gdfg df")
-		println("Actor-based: " + Await.result(ActorBased.run(lines), Duration.Inf))
+		println("Actor-based: " + Await.result(ActorBased.run(lines)(system), Duration.Inf))
 		println("State-based: " + Await.result(StateBased.run(lines), Duration.Inf))
 		Await.result(system.terminate(), Duration.Inf)
 	}

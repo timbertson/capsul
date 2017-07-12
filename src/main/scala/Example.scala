@@ -95,8 +95,7 @@ object ActorBased {
 		case class Add(line: String)
 	}
 
-	def run(lines: Iterable[String]) = {
-		val system = ActorSystem("akka-example")
+	def run(lines: Iterable[String])(implicit system: ActorSystem) = {
 		val wordCounter = system.actorOf(Props[WordCounter])
 		val counter = system.actorOf(Props[Counter])
 		implicit val duration: Timeout = 5 seconds
@@ -116,8 +115,10 @@ object ActorBased {
 
 object ExampleMain {
 	def main() {
+		val system = ActorSystem("akka-example")
 		val lines = List("fdsf  fdfkdsh fhsdjk", "fdj fjfgh dfkgh fd", "gfdfhgjkdf hgfgdf df gdf gfd gdfg df")
 		println("Actor-based: " + Await.result(ActorBased.run(lines), Duration.Inf))
 		println("State-based: " + Await.result(StateBased.run(lines), Duration.Inf))
+		Await.result(system.terminate(), Duration.Inf)
 	}
 }

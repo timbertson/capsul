@@ -71,6 +71,8 @@ trait UnitOfWork[A] {
 
 	def onEnqueue(): Unit
 	def enqueued(): Unit
+	def reportSuccess(result: A): Unit
+	def reportFailure(error: Throwable): Unit
 
 	def enqueue(state:ThreadState) = {
 		if (state.hasSpace(bufLen)) {
@@ -80,10 +82,6 @@ trait UnitOfWork[A] {
 			state.enqueueWaiter(this)
 		}
 	}
-
-	def reportSuccess(result: A): Unit
-
-	def reportFailure(error: Throwable): Unit
 
 	def run() = {
 		try {
@@ -103,41 +101,10 @@ trait UnitOfWork[A] {
 }
 
 object UnitOfWork {
-	trait HasEnqueuePromise[A] { this: UnitOfWork[_] =>
-		var enqueuedPromise: Promise[A] = null
-		def enqueueResult: A
-
-		def onEnqueue(): Unit = {
-			// mutation is safe since during enqueue only the enqueueing thread
-			// has a reference to this object
-			if (enqueuedPromise == null) {
-				enqueuedPromise = Promise()
-			}
-		}
-
-		def enqueued() {
-			enqueuedPromise.success(enqueueResult)
-		}
-	}
-
-	trait HasResultPromise[A] extends UnitOfWork[A] {
-		val resultPromise = Promise[A]()
-
-		def reportSuccess(result: A) = {
-//			println(this + " reportSuccess:" + result)
-			resultPromise.success(result)
-		}
-
-		def reportFailure(error: Throwable): Unit = {
-			resultPromise.failure(error)
-		}
-	}
-
   case class Full[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
 		val resultPromise = Promise[A]()
 
 		def reportSuccess(result: A) = {
-			//			println(this + " reportSuccess:" + result)
 			resultPromise.success(result)
 		}
 
@@ -146,10 +113,7 @@ object UnitOfWork {
 		}
 
 		var enqueuedPromise: Promise[Future[A]] = null
-
 		def onEnqueue(): Unit = {
-			// mutation is safe since during enqueue only the enqueueing thread
-			// has a reference to this object
 			if (enqueuedPromise == null) {
 				enqueuedPromise = Promise()
 			}
@@ -167,8 +131,6 @@ object UnitOfWork {
 		var enqueuedPromise: Promise[Unit] = null
 
 		def onEnqueue(): Unit = {
-			// mutation is safe since during enqueue only the enqueueing thread
-			// has a reference to this object
 			if (enqueuedPromise == null) {
 				enqueuedPromise = Promise()
 			}
@@ -186,7 +148,6 @@ object UnitOfWork {
 		val resultPromise = Promise[A]()
 
 		def reportSuccess(result: A) = {
-			//			println(this + " reportSuccess:" + result)
 			resultPromise.success(result)
 		}
 

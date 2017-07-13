@@ -65,49 +65,35 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 //// Supervisor strategy: I guess just have an uncaughtHandler per thread?
 //// You should be using Try instead of exceptions anyway...
 
-case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
-	val promise = Promise[A]()
-	var enqueuedPromise:Promise[Future[A]] = null
-	def future = promise.future
+trait UnitOfWork[A] {
+	val fn: Function0[A]
+	val bufLen: Int
 
-	def makeEnqueueable(): Unit = {
-		enqueuedPromise = Promise()
-	}
-
-//	def tryEnqueue(state:ThreadState) = {
-//		if (state.hasSpace(bufLen)) {
-//			state.enqueueTask(this)
-//		} else {
-//			// assert(state.running, "thread is full but not running!")
-//			state
-//		}
-//	}
+	def onEnqueue(): Unit
+	def enqueued(): Unit
 
 	def enqueue(state:ThreadState) = {
 		if (state.hasSpace(bufLen)) {
-      state.enqueueTask(this)
+			state.enqueueTask(this)
 		} else {
-			if (enqueuedPromise == null) {
-				// mutation is safe since during enqueue only the enqueueing thread
-				// has a reference to this object
-				enqueuedPromise = Promise()
-			}
-      state.enqueueWaiter(this)
+			this.onEnqueue()
+			state.enqueueWaiter(this)
 		}
 	}
 
-	def enqueued() {
-		enqueuedPromise.success(future)
-	}
+	def reportSuccess(result: A): Unit
 
+	def reportFailure(error: Throwable): Unit
 
 	def run() = {
 		try {
-			promise.success(fn())
+			reportSuccess(fn())
+//			println("success: " + this)
 		} catch {
 			case e:Throwable => {
 				if (NonFatal(e)) {
-					promise.failure(e)
+					reportFailure(e)
+//					println("failure: " + this)
 				} else {
 					throw e
 				}
@@ -116,6 +102,99 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 	}
 }
 
+object UnitOfWork {
+	trait HasEnqueuePromise[A] { this: UnitOfWork[_] =>
+		var enqueuedPromise: Promise[A] = null
+		def enqueueResult: A
+
+		def onEnqueue(): Unit = {
+			// mutation is safe since during enqueue only the enqueueing thread
+			// has a reference to this object
+			if (enqueuedPromise == null) {
+				enqueuedPromise = Promise()
+			}
+		}
+
+		def enqueued() {
+			enqueuedPromise.success(enqueueResult)
+		}
+	}
+
+	trait HasResultPromise[A] extends UnitOfWork[A] {
+		val resultPromise = Promise[A]()
+
+		def reportSuccess(result: A) = {
+//			println(this + " reportSuccess:" + result)
+			resultPromise.success(result)
+		}
+
+		def reportFailure(error: Throwable): Unit = {
+			resultPromise.failure(error)
+		}
+	}
+
+  case class Full[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
+		val resultPromise = Promise[A]()
+
+		def reportSuccess(result: A) = {
+			//			println(this + " reportSuccess:" + result)
+			resultPromise.success(result)
+		}
+
+		def reportFailure(error: Throwable): Unit = {
+			resultPromise.failure(error)
+		}
+
+		var enqueuedPromise: Promise[Future[A]] = null
+
+		def onEnqueue(): Unit = {
+			// mutation is safe since during enqueue only the enqueueing thread
+			// has a reference to this object
+			if (enqueuedPromise == null) {
+				enqueuedPromise = Promise()
+			}
+		}
+
+		def enqueued() {
+			enqueuedPromise.success(resultPromise.future)
+		}
+	}
+
+  case class EnqueueOnly[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
+		override def reportSuccess(result: A): Unit = ()
+		override def reportFailure(error: Throwable): Unit = ()
+
+		var enqueuedPromise: Promise[Unit] = null
+
+		def onEnqueue(): Unit = {
+			// mutation is safe since during enqueue only the enqueueing thread
+			// has a reference to this object
+			if (enqueuedPromise == null) {
+				enqueuedPromise = Promise()
+			}
+		}
+
+		def enqueued() {
+			enqueuedPromise.success(())
+		}
+	}
+
+	case class ReturnOnly[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
+		override def onEnqueue(): Unit = ()
+		override def enqueued(): Unit = ()
+
+		val resultPromise = Promise[A]()
+
+		def reportSuccess(result: A) = {
+			//			println(this + " reportSuccess:" + result)
+			resultPromise.success(result)
+		}
+
+		def reportFailure(error: Throwable): Unit = {
+			resultPromise.failure(error)
+		}
+	}
+}
 
 object ThreadState {
 	def popTask(state: ThreadState):ThreadState = {
@@ -193,8 +272,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (oldState.tasks.nonEmpty) {
 					// we popped a task!
 					// evaluate the task on this fiber
-					oldState.markWaiterEnqueued()
 					oldState.tasks.head.run()
+					oldState.markWaiterEnqueued()
 
           if (maxIterations == 0) {
             // re-enqueue the runnable instead of looping to prevent starvation
@@ -209,26 +288,46 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-    enqueueAsync(fun).map((_:Future[R]) => ())
+		enqueueAsync(fun).map((_:Future[R]) => ())
+
+//		val task = UnitOfWork.EnqueueOnly(fun, bufLen)
+//		if (enqueue(task)) {
+//			Future.successful(())
+//		} else {
+//			task.enqueuedPromise.future
+//		}
 	}
 
 	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
-		enqueueAsync(fun).flatMap(identity)
+//		enqueueAsync(fun).flatMap(identity)
+
+		val task = UnitOfWork.ReturnOnly(fun, bufLen)
+		enqueue(task)
+		task.resultPromise.future
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		val task = UnitOfWork(fun, bufLen)
+		val task = UnitOfWork.Full(fun, bufLen)
+
+		if (enqueue(task)) {
+			Future.successful(task.resultPromise.future)
+		} else {
+			task.enqueuedPromise.future
+		}
+	}
+
+	private def enqueue[A](task: UnitOfWork[A]): Boolean = {
 		val prevState = state.getAndTransform(task.enqueue)
 		if (prevState.hasSpace(bufLen)) {
 			// enqueued a task
+//			println("executed immeditaly")
 			if(!prevState.running) {
 				ec.execute(workLoop)
 			}
-			// println("enqueueAsync completed immediately")
-			Future.successful(task.future)
+			true
 		} else {
-			// enqueued a waiter
-      task.enqueuedPromise.future
+//			println("waiting...")
+			false
 		}
 	}
 }

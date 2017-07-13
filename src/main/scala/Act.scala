@@ -74,19 +74,24 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 		enqueuedPromise = Promise()
 	}
 
-	def tryEnqueue(state:ThreadState) = {
-		if (state.hasSpace(bufLen)) {
-			state.enqueueTask(this)
-		} else {
-			// assert(state.running, "thread is full but not running!")
-			state
-		}
-	}
+//	def tryEnqueue(state:ThreadState) = {
+//		if (state.hasSpace(bufLen)) {
+//			state.enqueueTask(this)
+//		} else {
+//			// assert(state.running, "thread is full but not running!")
+//			state
+//		}
+//	}
 
 	def enqueue(state:ThreadState) = {
 		if (state.hasSpace(bufLen)) {
       state.enqueueTask(this)
 		} else {
+			if (enqueuedPromise == null) {
+				// mutation is safe since during enqueue only the enqueueing thread
+				// has a reference to this object
+				enqueuedPromise = Promise()
+			}
       state.enqueueWaiter(this)
 		}
 	}
@@ -139,13 +144,10 @@ object ThreadState {
 			state.park()
 		} else {
 			var numTasks = state.numTasks
-			var numWaiters = state.numWaiters
-			if (state.hasWaiters) {
-				numWaiters -= 1
-			} else {
+			if (!state.hasWaiters) {
 				numTasks -= 1
 			}
-      new ThreadState(state.tasks.tail, state.running, numTasks, numWaiters)
+      new ThreadState(state.tasks.tail, state.running, numTasks)
 		}
 	}
 
@@ -182,39 +184,38 @@ object ThreadState {
 //		}
 //	}
 
-	def empty(capacity: Int) = new ThreadState(Queue.empty[UnitOfWork[_]], false, 0, 0)
+	def empty(capacity: Int) = new ThreadState(Vector.empty[UnitOfWork[_]], false, 0)
 
 	def start(state: ThreadState): (Boolean, ThreadState) = {
-		(!state.running, new ThreadState(state.tasks, true, state.numTasks, state.numWaiters))
+		(!state.running, new ThreadState(state.tasks, true, state.numTasks))
 	}
 }
 
-class ThreadState(val tasks: Queue[UnitOfWork[_]], val running: Boolean, val numTasks: Int, val numWaiters: Int) {
+class ThreadState(val tasks: Vector[UnitOfWork[_]], val running: Boolean, val numTasks: Int) {
 
-	def hasWaiters:Boolean = numWaiters > 0
+	def hasWaiters:Boolean = tasks.length > numTasks
 
-	def waiter: Option[UnitOfWork[_]] = {
-		// tasks is [Task, Task, ..., <Waiter>, ...]
-		// where the first waiter is at index `numTasks`
-		if (numWaiters == 0) None
-		else Some(tasks(numTasks))
+	def markWaiterEnqueued() {
+		if (hasWaiters) {
+      tasks(numTasks).enqueued()
+		}
 	}
 
 	def hasSpace(capacity: Int) = numTasks < capacity
 
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
-		assert(numWaiters == 0)
-		new ThreadState(tasks.enqueue(task), true, numTasks + 1, numWaiters)
+//		assert(numWaiters == 0)
+		new ThreadState(tasks.:+(task), true, numTasks + 1)
 	}
 
 	def enqueueWaiter(task: UnitOfWork[_]): ThreadState = {
 //		assert(running)
-		new ThreadState(tasks.enqueue(task), running, numTasks, numWaiters + 1)
+		new ThreadState(tasks.:+(task), running, numTasks)
 	}
 
 	def park() = {
 		// assert(running)
-		new ThreadState(tasks, false, numTasks, numWaiters)
+		new ThreadState(tasks, false, numTasks)
 	}
 }
 
@@ -246,12 +247,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (oldState.tasks.nonEmpty) {
 					// we popped a task!
 					// evaluate the task on this fiber
+					oldState.markWaiterEnqueued()
 					oldState.tasks.head.run()
-
-//					assert(!oldState.skipOneWaiter)
-					oldState.waiter.foreach { waiter =>
-            waiter.enqueued()
-					}
 
           if (maxIterations == 0) {
             // re-enqueue the runnable instead of looping to prevent starvation
@@ -291,27 +288,15 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
 		// println("enqueueAsync() called")
 		val task = UnitOfWork(fun, bufLen)
-
-		// try an immediate enqueue:
-		val prevState = state.getAndTransform(task.tryEnqueue)
+		val prevState = state.getAndTransform(task.enqueue)
 		if (prevState.hasSpace(bufLen)) {
-			// easy mode: tryEnqueue has enqueued the task already
+			// enqueued a task
 			autoSchedule(prevState)
 			// println("enqueueAsync completed immediately")
 			Future.successful(task.future)
 		} else {
-			// slow mode: make a promise and hop in the waiting queue if
-			// tasks is (still) full
-			val enqueued = Promise[Future[A]]()
-			task.enqueuedPromise = enqueued
-
-			val prevState = state.getAndTransform(task.enqueue)
-			autoSchedule(prevState)
-			if (prevState.hasSpace(bufLen)) {
-				// we queued a task (not a waiter)
-				task.enqueued()
-			}
-			task.enqueuedPromise.future
+			// enqueued a waiter
+      task.enqueuedPromise.future
 		}
 	}
 }

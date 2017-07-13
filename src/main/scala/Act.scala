@@ -118,27 +118,6 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 
 
 object ThreadState {
-//	class EnqueueResult(val success: Boolean, val wasRunning: Boolean) {
-//		def shouldSchedule = success && !wasRunning
-//		override def toString() = {
-//			s"EnqueueResult(success=$success, wasRunning=$wasRunning)"
-//		}
-//	}
-//
-//	// pre-bind the combinations we need
-//	val ENQUEUED_ALREADY_RUNNING = new EnqueueResult(success = true, wasRunning = true)
-//	val ENQUEUED_NOT_RUNNING = new EnqueueResult(success = true, wasRunning = false)
-//	val ENQUEUE_REJECTED = new EnqueueResult(success = false, wasRunning = true)
-//
-//	object EnqueueResult {
-//		def successful(running: Boolean) = {
-//			if (running) ENQUEUED_ALREADY_RUNNING else ENQUEUED_NOT_RUNNING
-//		}
-//
-//		def rejected = ENQUEUE_REJECTED
-//	}
-
-
 	def popTask(state: ThreadState):ThreadState = {
 		if (state.tasks.isEmpty) {
 			state.park()
@@ -150,39 +129,6 @@ object ThreadState {
       new ThreadState(state.tasks.tail, state.running, numTasks)
 		}
 	}
-
-//	def popTasks(state: ThreadState):(Option[ (Queue[UnitOfWork[_]], Queue[Waiter[_]]) ],ThreadState) = {
-//		if (state.tasks.isEmpty) {
-//			(None, state.park())
-//		} else {
-//			val (poppedWaiters, remainingWaiters) = state.waiters.splitAt(state.tasks.length)
-//			(Some((state.tasks, poppedWaiters)), new ThreadState(Queue.empty, remainingWaiters, state.running))
-//		}
-//	}
-
-//	def popWaiter(bufLen: Int)(state: ThreadState):(Option[Waiter[_]],ThreadState) = {
-//		if (state.waiters.isEmpty || state.tasks.size >= bufLen) {
-//			(None, state)
-//		} else {
-//			val (head, tail) = state.waiters.dequeue
-//			(Some(head), new ThreadState(state.tasks.enqueue(head.task), tail, state.running))
-//		}
-//	}
-
-//		def popWaiter(state: ThreadState):(Waiter[_],ThreadState) = {
-////			assert(state.waitIdx == 1)
-//      val (head, tail) = state.waiters.dequeue
-//			(head, new ThreadState(state.tasks.enqueue(head.task), tail, false, state.running))
-//		}
-
-//	def promoteWaiter(state: ThreadState):ThreadState = {
-//		if (state.waiterInLimbo) {
-//			val (head, tail) = state.waiters.dequeue
-//			new ThreadState(state.tasks.enqueue(head.task), tail, state.running, state.capacity)
-//		} else {
-//			state
-//		}
-//	}
 
 	def empty(capacity: Int) = new ThreadState(Vector.empty[UnitOfWork[_]], false, 0)
 
@@ -262,23 +208,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	private def autoSchedule(previousState: ThreadState) = {
-		if(!previousState.running) {
-			ec.execute(workLoop)
-		}
-	}
-
-//	private def autoSchedule(enqueueResult: EnqueueResult): Boolean = {
-//		// println(s"autoSchedule: $enqueueResult")
-//		if(enqueueResult.shouldSchedule) {
-//			// println("scheduling parked thread")
-//			ec.execute(workLoop)
-//		}
-//		enqueueResult.success
-//	}
-
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-	enqueueAsync(fun).map((_:Future[R]) => ())
+    enqueueAsync(fun).map((_:Future[R]) => ())
 	}
 
 	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
@@ -286,12 +217,13 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		// println("enqueueAsync() called")
 		val task = UnitOfWork(fun, bufLen)
 		val prevState = state.getAndTransform(task.enqueue)
 		if (prevState.hasSpace(bufLen)) {
 			// enqueued a task
-			autoSchedule(prevState)
+			if(!prevState.running) {
+				ec.execute(workLoop)
+			}
 			// println("enqueueAsync completed immediately")
 			Future.successful(task.future)
 		} else {

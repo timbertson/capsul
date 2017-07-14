@@ -213,19 +213,7 @@ object SequentialExecutor {
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val state = Atomic(ThreadState.empty(bufLen))
 
-	def logCallCount[A,B](fn:Function[A,B]):Function[A,B] = {
-		var count = 0
-		(a) => {
-			count += 1
-			if (count>10) println("."+count)
-			fn(a)
-		}
-	}
-
-
 	val workLoop:Runnable = new Runnable() {
-		// println("running")
-//		private val popWaiter: Function[ThreadState,(Option[Waiter[_]],ThreadState)] = ThreadState.popWaiter(bufLen)
 		def run() {
 			@tailrec def loop(maxIterations: Int): Unit = {
 				val oldState:ThreadState = state.getAndTransform(ThreadState.popTask)

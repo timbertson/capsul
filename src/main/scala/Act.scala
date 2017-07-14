@@ -162,46 +162,49 @@ object UnitOfWork {
 
 object ThreadState {
 	def popTask(state: ThreadState):ThreadState = {
-		if (state.tasks.isEmpty) {
+		if (!state.hasTasks) {
 			state.park()
 		} else {
-			val numTasks = if (state.hasWaiters) state.numTasks else state.numTasks - 1
-      new ThreadState(state.tasks.tail, state.running, numTasks)
+			var numTasks = state.numTasks
+			var numWaiters = 0
+			if (state.hasWaiters) {
+				// pop a waiter
+				numWaiters = state.numWaiters - 1
+			} else {
+				// pop a task
+				numTasks = state.numTasks - 1
+			}
+      new ThreadState(state.tasks.tail, state.running, numTasks, numWaiters)
 		}
 	}
 
-	def empty(capacity: Int) = new ThreadState(Vector.empty[UnitOfWork[_]], false, 0)
-
-	def start(state: ThreadState): (Boolean, ThreadState) = {
-		(!state.running, new ThreadState(state.tasks, true, state.numTasks))
-	}
+	def empty(capacity: Int) = new ThreadState(Vector.empty[UnitOfWork[_]], false, 0, 0)
 }
 
-class ThreadState(val tasks: Vector[UnitOfWork[_]], val running: Boolean, val numTasks: Int) {
-
-	def hasWaiters:Boolean = tasks.length > numTasks
+class ThreadState(val tasks: Vector[UnitOfWork[_]], val running: Boolean, val numTasks: Int, val numWaiters: Int) {
+	def hasTasks = numTasks != 0
+	def hasWaiters = numWaiters != 0
+	def hasSpace(capacity: Int) = numTasks < capacity
 
 	def markWaiterEnqueued() {
 		if (hasWaiters) {
-      tasks(numTasks).enqueued()
+			tasks(numTasks).enqueued()
 		}
 	}
 
-	def hasSpace(capacity: Int) = numTasks < capacity
-
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
 //		assert(numWaiters == 0)
-		new ThreadState(tasks.:+(task), true, numTasks + 1)
+		new ThreadState(tasks.:+(task), true, numTasks + 1, numWaiters)
 	}
 
 	def enqueueWaiter(task: UnitOfWork[_]): ThreadState = {
 //		assert(running)
-		new ThreadState(tasks.:+(task), running, numTasks)
+		new ThreadState(tasks.:+(task), running, numTasks, numWaiters + 1)
 	}
 
 	def park() = {
 		// assert(running)
-		new ThreadState(tasks, false, numTasks)
+		new ThreadState(tasks, false, numTasks, numWaiters)
 	}
 }
 

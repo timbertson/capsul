@@ -1,4 +1,5 @@
 import java.nio.charset.Charset
+import java.util.concurrent.locks.LockSupport
 
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
@@ -78,6 +79,8 @@ trait UnitOfWork[A] {
 		if (state.hasSpace(bufLen)) {
 			state.enqueueTask(this)
 		} else {
+			// we actually want to lose this commit race if we're fighting with the run thread
+			LockSupport.parkNanos(1000)
 			this.onEnqueue()
 			state.enqueueWaiter(this)
 		}
@@ -162,10 +165,7 @@ object ThreadState {
 		if (state.tasks.isEmpty) {
 			state.park()
 		} else {
-			var numTasks = state.numTasks
-			if (!state.hasWaiters) {
-				numTasks -= 1
-			}
+			val numTasks = if (state.hasWaiters) state.numTasks else state.numTasks - 1
       new ThreadState(state.tasks.tail, state.running, numTasks)
 		}
 	}
@@ -221,8 +221,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (oldState.tasks.nonEmpty) {
 					// we popped a task!
 					// evaluate the task on this fiber
-					oldState.tasks.head.run()
 					oldState.markWaiterEnqueued()
+					oldState.tasks.head.run()
 
           if (maxIterations == 0) {
             // re-enqueue the runnable instead of looping to prevent starvation

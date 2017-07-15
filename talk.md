@@ -186,4 +186,6 @@ doSomething()
 
 For backpressure, it's important for the receiver to be able to slow you down. Here it can do that if clients understand that they should not submit more work before the outer future is complete.
 
-But once that future is complete, your task isn't actually done, it's merely enqueued. So the inner future represents actual completion.
+Once that outer future is done, they can go ahead and submit another piece of work, knowing they won't overload the receiver. Meanwhile the inner future tracks the actual completion of their submitted task.
+
+In practice, most operations are either enqueue or await - either I want to send some piece of work and wait for just the outer future, or I want to perform some action and not continue until I have the result. So there are convenience functions for both of those, but they're built around this nested future.

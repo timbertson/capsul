@@ -462,7 +462,7 @@ object ActorExample {
 	}
 
 	def run(): Unit = {
-		val repeat = this.repeat(20) _
+		val repeat = this.repeat(12) _
 		val bufLen = 4
 
 		// // count lines (2 actors in parallel)
@@ -508,7 +508,7 @@ object ActorExample {
 		implicit val actorSystem = ActorSystem("akka-example")
 		implicit val akkaMaterializer = ActorMaterializer()
 
-		val countLimit = 10000
+		val countLimit = 100000
 		repeat("counter", List(
 			"akka counter" -> (() => CounterActor.run(countLimit)),
       "seq counter" -> (() => CounterState.run(countLimit)),
@@ -523,7 +523,7 @@ object ActorExample {
 		val jitter = 0.3f
 		val monixScheduler = monix.execution.Scheduler(ec)
 
-		repeat("pipelins", List(
+		repeat("pipeline", List(
       s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline" -> (() => Pipeline.runAkka(
         stages = stages,
         len = len,
@@ -560,7 +560,7 @@ object ActorExample {
 
 
 object ActTest {
-	def main() {
+	def main():Unit = {
 		ActorExample.run
 	}
 }

@@ -20,13 +20,13 @@ import scala.concurrent.ExecutionContext.Implicits.global
 object StateBased {
 	class WordCounter() {
 		private val state = SequentialState(0)
-		def add(line: String) = state.sendMap(_ + line.split("\\w").length)
+		def add(line: String) = state.sendTransform(_ + line.split("\\w").length)
 		def get = state.current
 	}
 
 	class Counter() {
 		val state = SequentialState(v = 0)
-		def inc() = state.sendMap(_ + 1)
+		def inc() = state.sendTransform(_ + 1)
 		def get = state.current
 	}
 

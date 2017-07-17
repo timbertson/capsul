@@ -44,17 +44,17 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	// Action types:
 	//
 	// mutate(fn: Function[State[T],R]
-	// map(fn: Function[T,T])
+	// transform(fn: Function[T,T])
 	// set(value: T)
 	// access: Function[T,R] -> accepts a mutable Ref for both reading and setting.
 
 	// sendMutate: omitted; sendMap is just as functional
-	def sendMap(fn: Function[T,T]):             Future[Unit]         = thread.enqueueOnly(() => state.set(fn(state.current)))
+	def sendTransform(fn: Function[T,T]):       Future[Unit]         = thread.enqueueOnly(() => state.set(fn(state.current)))
 	def sendSet(updated: T):                    Future[Unit]         = thread.enqueueOnly(() => state.set(updated))
 	def sendAccess(fn: Function[T,_]):          Future[Unit]         = thread.enqueueOnly(() => fn(state.current))
 
 	def awaitMutate[R](fn: Function[Ref[T],R]): Future[R]            = thread.enqueueReturn(() => fn(state))
-	def awaitMap[R](fn: Function[T,T]):         Future[Unit]         = thread.enqueueReturn(() => state.set(fn(state.current)))
+	def awaitTransform[R](fn: Function[T,T]):   Future[Unit]         = thread.enqueueReturn(() => state.set(fn(state.current)))
 	def awaitSet[R](updated: T):                Future[Unit]         = thread.enqueueReturn(() => state.set(updated))
 	def awaitAccess[R](fn: Function[T,R]):      Future[R]            = thread.enqueueReturn(() => fn(state.current))
 	def current:                                Future[T]            = thread.enqueueReturn(() => state.current)

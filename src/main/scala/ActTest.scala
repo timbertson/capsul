@@ -27,14 +27,14 @@ object Sleep {
 
 class SampleActorWordCount(implicit sched: ExecutionContext) {
 	val state = SequentialState(0)
-	def feed(line: String) = state.sendMap(_ + line.split("\\w").length)
+	def feed(line: String) = state.sendTransform(_ + line.split("\\w").length)
 	def reset() = state.sendSet(0)
 	def current = state.current
 }
 
 class SampleCountingActor()(implicit ec: ExecutionContext) {
 	val state = SequentialState(v = 0)
-	def inc() = state.sendMap(_ + 1)
+	def inc() = state.sendTransform(_ + 1)
 	def current = state.current
 }
 
@@ -72,8 +72,8 @@ object CounterActor {
 
 class CounterState()(implicit ec: ExecutionContext) {
 	private val state = SequentialState(0)
-	def inc() = state.sendMap(_+1)
-	def dec() = state.sendMap(_-1)
+	def inc() = state.sendTransform(_+1)
+	def dec() = state.sendTransform(_-1)
 	def current = state.current
 }
 
@@ -108,7 +108,7 @@ class PingPongActor()(implicit ec: ExecutionContext) {
 		peer = newPeer
 	}
 	def ping(n: Int): Future[Unit] = {
-		state.sendMap(n :: _).flatMap { case () =>
+		state.sendTransform(n :: _).flatMap { case () =>
 			if (n == 1) {
 				Future.successful(())
 			} else {
@@ -213,7 +213,7 @@ object Pipeline {
 		val sink = SequentialState(0)
 		val drained = Promise[Int]()
 		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
-			val mapSent = sink.awaitMap { current =>
+			val transformSent = sink.sendTransform { current =>
 				val addition = batch.map(_.get.getOrElse(0)).sum
 				current + addition
 				// println(s"after batch $addition ($batch), size = ${state.get}")
@@ -221,13 +221,13 @@ object Pipeline {
 
 			if (batch.exists(_.get.isEmpty)) {
 				// read the final state
-				mapSent.flatMap { case () =>
+				transformSent.flatMap { case () =>
 					sink.awaitAccess { count =>
 						drained.success(count)
 					}
 				}
 			} else {
-				mapSent
+				transformSent
 			}
 		}
 

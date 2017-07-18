@@ -558,9 +558,18 @@ object ActorExample {
 	}
 }
 
+object PerfRun {
+	def main(): Unit = {
+		val threadPool = Executors.newFixedThreadPool(4)
+		implicit val ec = ExecutionContext.fromExecutor(threadPool)
+		Await.result(CounterState.run(Int.MaxValue), Duration.Inf)
+	}
+}
+
 
 object ActTest {
 	def main():Unit = {
 		ActorExample.run
+//    PerfRun.main()
 	}
 }

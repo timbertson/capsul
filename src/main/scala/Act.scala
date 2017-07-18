@@ -211,6 +211,7 @@ class ThreadState(val tasks: Vector[UnitOfWork[_]], val running: Boolean, val nu
 object SequentialExecutor {
 	val defaultBufferSize = 5
 	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
+	private val successfulUnit = Future.successful(())
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
@@ -240,14 +241,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-		enqueueAsync(fun).map((_:Future[R]) => ())
+//		enqueueAsync(fun).map((_:Future[R]) => ())
 
-//		val task = UnitOfWork.EnqueueOnly(fun, bufLen)
-//		if (enqueue(task)) {
-//			Future.successful(())
-//		} else {
-//			task.enqueuedPromise.future
-//		}
+		val task = UnitOfWork.EnqueueOnly(fun, bufLen)
+		if (enqueue(task)) {
+			SequentialExecutor.successfulUnit
+		} else {
+			task.enqueuedPromise.future
+		}
 	}
 
 	def enqueueReturn[R](fun: Function0[R]): Future[R] = {

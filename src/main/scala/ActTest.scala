@@ -463,7 +463,7 @@ object ActorExample {
 
 	def run(): Unit = {
 		val repeat = this.repeat(12) _
-		val bufLen = 4
+		val bufLen = 10
 
 		// // count lines (2 actors in parallel)
 		// repeat {
@@ -511,7 +511,7 @@ object ActorExample {
 		val countLimit = 100000
 		repeat("counter", List(
 			"akka counter" -> (() => CounterActor.run(countLimit)),
-      "seq counter" -> (() => CounterState.run(countLimit)),
+//			"seq counter" -> (() => CounterState.run(countLimit)),
 			"seq-backpressure counter" -> (() => CounterState.runWithBackpressure(countLimit))
 		))
 

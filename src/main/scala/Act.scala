@@ -1,15 +1,11 @@
-import java.nio.charset.Charset
 import java.util.concurrent.locks.LockSupport
 
-import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
 
 import scala.annotation.tailrec
 import scala.collection.immutable.Queue
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, ExecutionContext, Future, Promise}
-import scala.util.{Success, Try}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 class Ref[T](init:T) {
 	@volatile private var v = init
@@ -63,26 +59,41 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def rawAccess[R](fn: Function[T,R]):        Future[Future[R]]    = thread.enqueueAsync(() => fn(state.current))
 }
 
-//// Supervisor strategy: I guess just have an uncaughtHandler per thread?
-//// You should be using Try instead of exceptions anyway...
+case class UnitOfWork[A](fn: Function0[A], bufLen: Int, dest: SequentialExecutor) {
+	val resultPromise = Promise[A]()
 
-trait UnitOfWork[A] {
-	val fn: Function0[A]
-	val bufLen: Int
+	def reportSuccess(result: A) = {
+		resultPromise.success(result)
+	}
 
-	def onEnqueue(): Unit
-	def enqueued(): Unit
-	def reportSuccess(result: A): Unit
-	def reportFailure(error: Throwable): Unit
+	def reportFailure(error: Throwable): Unit = {
+		resultPromise.failure(error)
+	}
 
-	def enqueue(state:ThreadState) = {
+	var enqueuedPromise: Promise[Future[A]] = null
+
+	def enqueued() {
+		enqueuedPromise.success(resultPromise.future)
+	}
+
+	def delayEnqueue(state: ThreadState)(implicit ec: ExecutionContext) = {
+		if (enqueuedPromise == null) {
+			enqueuedPromise = Promise()
+		}
+		state.nextWaiter.onComplete { _ =>
+			if (dest.enqueue(this)) {
+				this.enqueued()
+			}
+		}
+	}
+
+	def tryEnqueue(state:ThreadState) = {
 		if (state.hasSpace(bufLen)) {
 			state.enqueueTask(this)
 		} else {
 			// we actually want to lose this commit race if we're fighting with the run thread
 			LockSupport.parkNanos(1000)
-			this.onEnqueue()
-			state.enqueueWaiter(this)
+			state.enqueueWaiter()
 		}
 	}
 
@@ -103,103 +114,38 @@ trait UnitOfWork[A] {
 	}
 }
 
-object UnitOfWork {
-  case class Full[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
-		val resultPromise = Promise[A]()
-
-		def reportSuccess(result: A) = {
-			resultPromise.success(result)
-		}
-
-		def reportFailure(error: Throwable): Unit = {
-			resultPromise.failure(error)
-		}
-
-		var enqueuedPromise: Promise[Future[A]] = null
-		def onEnqueue(): Unit = {
-			if (enqueuedPromise == null) {
-				enqueuedPromise = Promise()
-			}
-		}
-
-		def enqueued() {
-			enqueuedPromise.success(resultPromise.future)
-		}
-	}
-
-  case class EnqueueOnly[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
-		override def reportSuccess(result: A): Unit = ()
-		override def reportFailure(error: Throwable): Unit = ()
-
-		var enqueuedPromise: Promise[Unit] = null
-
-		def onEnqueue(): Unit = {
-			if (enqueuedPromise == null) {
-				enqueuedPromise = Promise()
-			}
-		}
-
-		def enqueued() {
-			enqueuedPromise.success(())
-		}
-	}
-
-	case class ReturnOnly[A](fn: Function0[A], bufLen: Int) extends UnitOfWork[A] {
-		override def onEnqueue(): Unit = ()
-		override def enqueued(): Unit = ()
-
-		val resultPromise = Promise[A]()
-
-		def reportSuccess(result: A) = {
-			resultPromise.success(result)
-		}
-
-		def reportFailure(error: Throwable): Unit = {
-			resultPromise.failure(error)
-		}
-	}
-}
-
 object ThreadState {
 	def popTask(state: ThreadState):ThreadState = {
 		if (!state.hasTasks) {
 			state.park()
 		} else {
-			var numTasks = state.numTasks
-			var numWaiters = 0
-			if (state.hasWaiters) {
-				// pop a waiter
-				numWaiters = state.numWaiters - 1
-			} else {
-				// pop a task
-				numTasks = state.numTasks - 1
-			}
+			val numTasks = state.numTasks - 1
+			val numWaiters = Math.max(state.numWaiters - 1, 0)
       new ThreadState(state.tasks.tail, state.running, numTasks, numWaiters)
 		}
 	}
 
-	def empty(capacity: Int) = new ThreadState(Vector.empty[UnitOfWork[_]], false, 0, 0)
+	def empty = new ThreadState(Queue.empty[UnitOfWork[_]], false, 0, 0)
 }
 
-class ThreadState(val tasks: Vector[UnitOfWork[_]], val running: Boolean, val numTasks: Int, val numWaiters: Int) {
+class ThreadState(val tasks: Queue[UnitOfWork[_]], val running: Boolean, val numTasks: Int, val numWaiters: Int) {
 	def hasTasks = numTasks != 0
 	def hasWaiters = numWaiters != 0
 	def hasSpace(capacity: Int) = numTasks < capacity
 
-	def markWaiterEnqueued() {
-		if (hasWaiters) {
-			tasks(numTasks).enqueued()
-		}
+	def nextWaiter = {
+    val taskIdx = numWaiters % numTasks
+    tasks(taskIdx).resultPromise.future
 	}
 
 	def enqueueTask(task: UnitOfWork[_]): ThreadState = {
 //		assert(numWaiters == 0)
-		new ThreadState(tasks.:+(task), true, numTasks + 1, numWaiters)
+		new ThreadState(tasks.enqueue(task), true, numTasks + 1, numWaiters)
 	}
 
-	def enqueueWaiter(task: UnitOfWork[_]): ThreadState = {
+	def enqueueWaiter(): ThreadState = {
 //		assert(running)
-		new ThreadState(tasks.:+(task), running, numTasks, numWaiters + 1)
+		new ThreadState(tasks, running, numTasks, numWaiters + 1)
 	}
 
 	def park() = {
@@ -209,13 +155,12 @@ class ThreadState(val tasks: Vector[UnitOfWork[_]], val running: Boolean, val nu
 }
 
 object SequentialExecutor {
-	val defaultBufferSize = 5
+	val defaultBufferSize = 10
 	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
-	private val successfulUnit = Future.successful(())
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private val state = Atomic(ThreadState.empty(bufLen))
+	private val state = Atomic(ThreadState.empty)
 
 	val workLoop:Runnable = new Runnable() {
 		def run() {
@@ -224,10 +169,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 				if (oldState.tasks.nonEmpty) {
 					// we popped a task!
-					// evaluate the task on this fiber
-					oldState.markWaiterEnqueued()
 					oldState.tasks.head.run()
-
           if (maxIterations == 0) {
             // re-enqueue the runnable instead of looping to prevent starvation
             ec.execute(workLoop)
@@ -241,27 +183,15 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-//		enqueueAsync(fun).map((_:Future[R]) => ())
-
-		val task = UnitOfWork.EnqueueOnly(fun, bufLen)
-		if (enqueue(task)) {
-			SequentialExecutor.successfulUnit
-		} else {
-			task.enqueuedPromise.future
-		}
+		enqueueAsync(fun).map((_:Future[R]) => ())
 	}
 
 	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
-//		enqueueAsync(fun).flatMap(identity)
-
-		val task = UnitOfWork.ReturnOnly(fun, bufLen)
-		enqueue(task)
-		task.resultPromise.future
+		enqueueAsync(fun).flatMap(identity)
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		val task = UnitOfWork.Full(fun, bufLen)
-
+		val task = UnitOfWork(fun, bufLen, this)
 		if (enqueue(task)) {
 			Future.successful(task.resultPromise.future)
 		} else {
@@ -269,17 +199,16 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	private def enqueue[A](task: UnitOfWork[A]): Boolean = {
-		val prevState = state.getAndTransform(task.enqueue)
+	// TODO: private
+	def enqueue[A](task: UnitOfWork[A]): Boolean = {
+		val prevState = state.getAndTransform(task.tryEnqueue)
 		if (prevState.hasSpace(bufLen)) {
-			// enqueued a task
-//			println("executed immeditaly")
 			if(!prevState.running) {
 				ec.execute(workLoop)
 			}
 			true
 		} else {
-//			println("waiting...")
+			task.delayEnqueue(prevState)
 			false
 		}
 	}

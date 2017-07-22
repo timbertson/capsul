@@ -7,6 +7,13 @@ import scala.annotation.tailrec
 import scala.collection.immutable.Queue
 import scala.concurrent.{ExecutionContext, Future, Promise}
 
+class Ref[T](init:T) {
+	@volatile private var v = init
+	def current = v
+	def set(updated:T) {
+		v = updated
+	}
+}
 
 object SequentialState {
 	def apply[T](v: T)(implicit ec: ExecutionContext) =
@@ -37,7 +44,7 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	// set(value: T)
 	// access: Function[T,R] -> accepts a mutable Ref for both reading and setting.
 
-	// sendMutate: omitted; sendMap is just as functional
+	// sendMutate: omitted; sendTransform is just as functional
 	def sendTransform(fn: Function[T,T]):       Future[Unit]         = thread.enqueueOnly(() => state.set(fn(state.current)))
 	def sendSet(updated: T):                    Future[Unit]         = thread.enqueueOnly(() => state.set(updated))
 	def sendAccess(fn: Function[T,_]):          Future[Unit]         = thread.enqueueOnly(() => fn(state.current))

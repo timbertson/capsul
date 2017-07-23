@@ -1,3 +1,5 @@
+package net.gfxmonk.sequentialstate
+
 import java.util.concurrent.locks.LockSupport
 
 import monix.execution.atomic.{Atomic, AtomicAny}

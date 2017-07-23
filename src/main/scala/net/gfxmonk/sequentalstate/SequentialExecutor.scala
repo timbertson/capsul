@@ -1,3 +1,5 @@
+package net.gfxmonk.sequentialstate
+
 import monix.execution.atomic.Atomic
 import scala.annotation.tailrec
 import scala.collection.immutable.Queue

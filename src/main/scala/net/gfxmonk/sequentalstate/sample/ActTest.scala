@@ -1,3 +1,6 @@
+package net.gfxmonk.sequentialstate.example
+import net.gfxmonk.sequentialstate._
+
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal

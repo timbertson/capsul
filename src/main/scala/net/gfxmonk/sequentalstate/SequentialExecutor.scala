@@ -20,7 +20,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (oldState.hasTasks) {
 					// we popped a task!
 					oldState.tasks.head.run()
-					oldState.waiters.headOption.foreach(_.enqueuedAsync())
+					oldState.markWaiterEnqueued()
 					if (maxIterations == 0) {
 						// re-enqueue the runnable instead of looping to prevent starvation
 						ec.execute(workLoop)
@@ -69,32 +69,26 @@ object ExecutorState {
 		if (!state.hasTasks) {
 			state.park()
 		} else {
-
-			var waiters = state.waiters
-			var tasks = state.tasks.tail
+			val tasks = state.tasks.tail
 			var numTasks = state.numTasks
 			var numWaiters = state.numWaiters
 
-			if (waiters.nonEmpty) {
+			if (state.hasWaiters) {
 				// promote waiter to task
-				var (waiter, remainingWaiters) = waiters.dequeue
-				waiters = remainingWaiters
-				tasks = tasks.enqueue(waiter)
 				numWaiters -= 1
 			} else {
 				numTasks -= 1
 			}
 
-			new ExecutorState(tasks, waiters, state.running, numTasks, numWaiters)
+			new ExecutorState(tasks, state.running, numTasks, numWaiters)
 		}
 	}
 
-	def empty = new ExecutorState(Queue.empty[UnitOfWork[_]], Queue.empty[UnitOfWork[_]], false, 0, 0)
+	def empty = new ExecutorState(Vector.empty[UnitOfWork[_]], false, 0, 0)
 }
 
 class ExecutorState(
-	val tasks: Queue[UnitOfWork[_]],
-	val waiters: Queue[UnitOfWork[_]],
+	val tasks: Vector[UnitOfWork[_]],
 	val running: Boolean,
 	private val numTasks: Int,
 	private val numWaiters: Int
@@ -103,18 +97,22 @@ class ExecutorState(
 	def hasWaiters = numWaiters != 0
 	def hasSpace(capacity: Int) = numTasks < capacity
 
+	def markWaiterEnqueued() = if (hasWaiters) {
+		tasks(numTasks).enqueuedAsync()
+	}
+
 	def enqueueTask(task: UnitOfWork[_]): ExecutorState = {
 //		assert(numWaiters == 0)
-		new ExecutorState(tasks.enqueue(task), waiters, true, numTasks + 1, numWaiters)
+		new ExecutorState(tasks.:+(task), true, numTasks + 1, numWaiters)
 	}
 
 	def enqueueWaiter(waiter: UnitOfWork[_]): ExecutorState = {
 //		assert(running)
-		new ExecutorState(tasks, waiters.enqueue(waiter), running, numTasks, numWaiters + 1)
+		new ExecutorState(tasks.:+(waiter), running, numTasks, numWaiters + 1)
 	}
 
 	def park() = {
 		// assert(running)
-		new ExecutorState(tasks, waiters, false, numTasks, numWaiters)
+		new ExecutorState(tasks, false, numTasks, numWaiters)
 	}
 }

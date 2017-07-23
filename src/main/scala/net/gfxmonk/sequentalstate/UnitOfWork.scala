@@ -12,7 +12,7 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 		enqueuedPromise.success(resultPromise.future)
 	}
 
-	def tryEnqueue(state:ExecutorState) = {
+	def enqueue(state:ExecutorState) = {
 		if (state.hasSpace(bufLen)) {
 			state.enqueueTask(this)
 		} else {
@@ -21,7 +21,7 @@ case class UnitOfWork[A](fn: Function0[A], bufLen: Int) {
 			if (enqueuedPromise == null) {
 				enqueuedPromise = Promise()
 			}
-			state.enqueueWaiter()
+			state.enqueueWaiter(this)
 		}
 	}
 

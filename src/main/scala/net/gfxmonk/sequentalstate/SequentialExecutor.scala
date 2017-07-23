@@ -20,6 +20,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (oldState.hasTasks) {
 					// we popped a task!
 					oldState.tasks.head.run()
+					oldState.waiters.headOption.foreach(_.enqueuedAsync())
 					if (maxIterations == 0) {
 						// re-enqueue the runnable instead of looping to prevent starvation
 						ec.execute(workLoop)
@@ -50,18 +51,13 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	private def enqueue[A](task: UnitOfWork[A]): Boolean = {
-		val prevState = state.getAndTransform(task.tryEnqueue)
+		val prevState = state.getAndTransform(task.enqueue)
 		if (prevState.hasSpace(bufLen)) {
 			if(!prevState.running) {
 				ec.execute(workLoop)
 			}
 			true
 		} else {
-			prevState.nextWaiter.onComplete { _ =>
-				if (enqueue(task)) {
-					task.enqueuedAsync()
-				}
-			}
 			false
 		}
 	}
@@ -73,21 +69,32 @@ object ExecutorState {
 		if (!state.hasTasks) {
 			state.park()
 		} else {
-			val numTasks = state.numTasks - 1
-			val numWaiters = if (state.hasWaiters) {
-				state.numWaiters - 1
+
+			var waiters = state.waiters
+			var tasks = state.tasks.tail
+			var numTasks = state.numTasks
+			var numWaiters = state.numWaiters
+
+			if (waiters.nonEmpty) {
+				// promote waiter to task
+				var (waiter, remainingWaiters) = waiters.dequeue
+				waiters = remainingWaiters
+				tasks = tasks.enqueue(waiter)
+				numWaiters -= 1
 			} else {
-				0
+				numTasks -= 1
 			}
-			new ExecutorState(state.tasks.tail, state.running, numTasks, numWaiters)
+
+			new ExecutorState(tasks, waiters, state.running, numTasks, numWaiters)
 		}
 	}
 
-	def empty = new ExecutorState(Queue.empty[UnitOfWork[_]], false, 0, 0)
+	def empty = new ExecutorState(Queue.empty[UnitOfWork[_]], Queue.empty[UnitOfWork[_]], false, 0, 0)
 }
 
 class ExecutorState(
 	val tasks: Queue[UnitOfWork[_]],
+	val waiters: Queue[UnitOfWork[_]],
 	val running: Boolean,
 	private val numTasks: Int,
 	private val numWaiters: Int
@@ -96,23 +103,18 @@ class ExecutorState(
 	def hasWaiters = numWaiters != 0
 	def hasSpace(capacity: Int) = numTasks < capacity
 
-	def nextWaiter = {
-		val taskIdx = numWaiters % numTasks
-		tasks(taskIdx).resultPromise.future
-	}
-
 	def enqueueTask(task: UnitOfWork[_]): ExecutorState = {
 //		assert(numWaiters == 0)
-		new ExecutorState(tasks.enqueue(task), true, numTasks + 1, numWaiters)
+		new ExecutorState(tasks.enqueue(task), waiters, true, numTasks + 1, numWaiters)
 	}
 
-	def enqueueWaiter(): ExecutorState = {
+	def enqueueWaiter(waiter: UnitOfWork[_]): ExecutorState = {
 //		assert(running)
-		new ExecutorState(tasks, running, numTasks, numWaiters + 1)
+		new ExecutorState(tasks, waiters.enqueue(waiter), running, numTasks, numWaiters + 1)
 	}
 
 	def park() = {
 		// assert(running)
-		new ExecutorState(tasks, false, numTasks, numWaiters)
+		new ExecutorState(tasks, waiters, false, numTasks, numWaiters)
 	}
 }

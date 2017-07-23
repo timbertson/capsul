@@ -4,7 +4,7 @@ import net.gfxmonk.sequentialstate._
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
-import java.util.concurrent.{Executors, TimeUnit}
+import java.util.concurrent.{Executors, TimeUnit, ForkJoinPool}
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -563,7 +563,8 @@ object ActorExample {
 
 object PerfRun {
 	def main(): Unit = {
-		val threadPool = Executors.newFixedThreadPool(4)
+		// val threadPool = Executors.newFixedThreadPool(4)
+		val threadPool = new ForkJoinPool(4)
 		implicit val ec = ExecutionContext.fromExecutor(threadPool)
 		Await.result(CounterState.run(Int.MaxValue), Duration.Inf)
 	}

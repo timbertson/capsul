@@ -8,6 +8,7 @@ import scala.concurrent.{ExecutionContext, Future}
 object SequentialExecutor {
 	val defaultBufferSize = 10
 	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
+	private val successfulUnit = Future.successful(())
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
@@ -34,15 +35,26 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-		enqueueAsync(fun).map((_:Future[R]) => ())
+//		enqueueAsync(fun).map((_:Future[R]) => ())
+
+		val task = UnitOfWork.EnqueueOnly(fun, bufLen)
+		if (enqueue(task)) {
+			SequentialExecutor.successfulUnit
+		} else {
+			task.enqueuedPromise.future
+		}
 	}
 
 	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
-		enqueueAsync(fun).flatMap(identity)
+//		enqueueAsync(fun).flatMap(identity)
+
+		val task = UnitOfWork.ReturnOnly(fun, bufLen)
+		enqueue(task)
+		task.resultPromise.future
 	}
 
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		val task = UnitOfWork(fun, bufLen)
+		val task = UnitOfWork.Full(fun, bufLen)
 		if (enqueue(task)) {
 			Future.successful(task.resultPromise.future)
 		} else {

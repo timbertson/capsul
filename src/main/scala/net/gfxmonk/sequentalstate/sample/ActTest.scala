@@ -209,7 +209,7 @@ object Pipeline {
 		timePerStep: Float,
 		jitter: Float
 	)(implicit ec: ExecutionContext): Future[Int] = {
-		val threadPool = Executors.newFixedThreadPool(parallelism)
+		val threadPool = ActorExample.makeThreadPool(parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		val source = Iterator.continually { 0 }.take(len)
@@ -287,7 +287,7 @@ object Pipeline {
 		jitter: Float
 	)(implicit sched: monix.execution.Scheduler):Future[Int] = {
 
-		val threadPool = Executors.newFixedThreadPool(parallelism)
+		val threadPool = ActorExample.makeThreadPool(parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		import monix.eval._
@@ -334,7 +334,7 @@ object Pipeline {
 		import scala.concurrent.duration._
 		import java.nio.file.Paths
 
-		val threadPool = Executors.newFixedThreadPool(parallelism)
+		val threadPool = ActorExample.makeThreadPool(parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		// val promise = Promise[Int]()
@@ -376,7 +376,12 @@ object Pipeline {
 }
 
 object ActorExample {
-	val threadPool = Executors.newFixedThreadPool(4)
+	def makeThreadPool(parallelism: Int) = {
+		Executors.newFixedThreadPool(parallelism)
+		// new ForkJoinPool(parallelism)
+	}
+
+	val threadPool = makeThreadPool(4)
 	implicit val ec = ExecutionContext.fromExecutor(threadPool)
 	// val globalEc = scala.concurrent.ExecutionContext.Implicits.global
 	def makeLines(n:Int=500) = Iterator.continually {
@@ -524,8 +529,7 @@ object ActorExample {
 
 object PerfRun {
 	def main(): Unit = {
-		// val threadPool = Executors.newFixedThreadPool(4)
-		val threadPool = new ForkJoinPool(4)
+		val threadPool = ActorExample.makeThreadPool(4)
 		implicit val ec = ExecutionContext.fromExecutor(threadPool)
 		Await.result(CounterState.run(Int.MaxValue), Duration.Inf)
 	}

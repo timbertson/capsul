@@ -75,7 +75,10 @@ object CounterActor {
 
 class CounterState()(implicit ec: ExecutionContext) {
 	private val state = SequentialState(0)
-	def inc() = state.sendTransform(_+1)
+	def inc() = state.sendTransform{
+		Thread.sleep(1)
+		_+1
+	}
 	def dec() = state.sendTransform(_-1)
 	def current = state.current
 }
@@ -470,14 +473,14 @@ object ActorExample {
 	}
 
 	def run(): Unit = {
-		val repeat = this.repeat(12) _
+		val repeat = this.repeat(5) _
 		val bufLen = 10
 
 		import akka.actor.ActorSystem
 		implicit val actorSystem = ActorSystem("akka-example")
 		implicit val akkaMaterializer = ActorMaterializer()
 
-		val countLimit = 100000
+		val countLimit = 1000
 		repeat("counter", List(
 			"akka counter" -> (() => CounterActor.run(countLimit)),
 			// "seq counter" -> (() => CounterState.run(countLimit)),

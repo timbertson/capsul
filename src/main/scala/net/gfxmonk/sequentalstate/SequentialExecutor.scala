@@ -1,8 +1,12 @@
 package net.gfxmonk.sequentialstate
 
-import monix.execution.atomic.Atomic
+import java.util.concurrent.ConcurrentLinkedQueue
+
+import monix.execution.atomic.{Atomic, AtomicInt}
+
 import scala.annotation.tailrec
 import scala.collection.immutable.Queue
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 
 object SequentialExecutor {
@@ -12,25 +16,64 @@ object SequentialExecutor {
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private val state = Atomic(ExecutorState.empty)
+	private val state = AtomicInt(ExecutorState.empty)
+	private val tasks = new ConcurrentLinkedQueue[UnitOfWork[_]]()
 
 	val workLoop:Runnable = new Runnable() {
 		def run() {
-			@tailrec def loop(maxIterations: Int): Unit = {
-				val oldState = state.getAndTransform(ExecutorState.popTask)
-				if (oldState.hasTasks) {
-					// we popped a task!
-					oldState.tasks.head.run()
-					oldState.markWaiterEnqueued()
-					if (maxIterations == 0) {
-						// re-enqueue the runnable instead of looping to prevent starvation
-						ec.execute(workLoop)
-					} else {
-						loop(maxIterations - 1)
+			@tailrec def loop(maxIterations: Int, numEnqueued: Int): Unit = {
+//				println("loop go")
+				// numEnqueued may be negative, which equates to 0
+				val it = tasks.iterator()
+				var tasksConsumed = 0
+
+				while(it.hasNext) {
+					val task = it.next()
+					tasks.poll() // remove the item we just processed
+					tasksConsumed += 1
+//					println("loop run")
+					task.run()
+
+					// TODO: is this accurate?
+					if (tasksConsumed > numEnqueued) {
+						task.enqueuedAsync()
 					}
 				}
+
+//				var tasksToEnqueue = if (tasksConsumed < bufLen) {
+//					// enqueue `tasksConsumed`, after advancing up to `bufLen`
+//					var skip = bufLen - tasksConsumed
+//					while(skip > 0 && it.hasNext) {
+//						skip -= 1
+//						it.next().enqueuedAsync()
+//					}
+//					tasksConsumed
+//				} else {
+//					// enqueue `bufLen`, immediately
+//					bufLen
+//				}
+//
+//				while (tasksToEnqueue > 0 && it.hasNext) {
+//					tasksToEnqueue -= 1
+//					it.next().enqueuedAsync()
+//				}
+
+				if (tasksConsumed >= 0) {
+					// TODO: consistency!
+//					Thread.sleep(10)
+					val newState = state.transformAndGet(_ - tasksConsumed)
+//					println("popped " + tasksConsumed + " tasks, now " + newState)
+					if (ExecutorState.hasTasks(newState)) {
+						// we got more tasks, don't stop now!
+						// Note that only the first `bufLen` tasks will have been preemptively marked as enqueued
+						val numEnqueuedTasks = bufLen - tasksConsumed
+						loop(maxIterations, numEnqueuedTasks)
+					}
+				}
+
+				// TODO: implement maxIterations
 			}
-			loop(200)
+			loop(200, bufLen)
 		}
 	}
 
@@ -56,6 +99,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
 		val task = UnitOfWork.Full(fun, bufLen)
 		if (enqueue(task)) {
+//			println("immediate!")
 			Future.successful(task.resultPromise.future)
 		} else {
 			task.enqueuedPromise.future
@@ -63,68 +107,24 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	private def enqueue[A](task: UnitOfWork[A]): Boolean = {
-		val prevState = state.getAndTransform(task.enqueue)
-		if (prevState.hasSpace(bufLen)) {
-			if(!prevState.running) {
-				ec.execute(workLoop)
-			}
+		val prevState = state.getAndIncrement()
+		tasks.add(task)
+
+//		println("after enqueue, " + prevState + ", " + prevState.hasSpace(bufLen))
+		if(ExecutorState.isEmpty(prevState)) {
+			//				println("Running!")
+			ec.execute(workLoop)
 			true
 		} else {
-			false
+			ExecutorState.hasSpace(prevState, bufLen)
 		}
 	}
 }
-
 
 object ExecutorState {
-	def popTask(state: ExecutorState):ExecutorState = {
-		if (!state.hasTasks) {
-			state.park()
-		} else {
-			val tasks = state.tasks.tail
-			var numTasks = state.numTasks
-			var numWaiters = state.numWaiters
-
-			if (state.hasWaiters) {
-				// promote waiter to task
-				numWaiters -= 1
-			} else {
-				numTasks -= 1
-			}
-
-			new ExecutorState(tasks, state.running, numTasks, numWaiters)
-		}
-	}
-
-	def empty = new ExecutorState(Vector.empty[UnitOfWork[_]], false, 0, 0)
-}
-
-class ExecutorState(
-	val tasks: Vector[UnitOfWork[_]],
-	val running: Boolean,
-	private val numTasks: Int,
-	private val numWaiters: Int
-) {
-	def hasTasks = numTasks != 0
-	def hasWaiters = numWaiters != 0
-	def hasSpace(capacity: Int) = numTasks < capacity
-
-	def markWaiterEnqueued() = if (hasWaiters) {
-		tasks(numTasks).enqueuedAsync()
-	}
-
-	def enqueueTask(task: UnitOfWork[_]): ExecutorState = {
-//		assert(numWaiters == 0)
-		new ExecutorState(tasks.:+(task), true, numTasks + 1, numWaiters)
-	}
-
-	def enqueueWaiter(waiter: UnitOfWork[_]): ExecutorState = {
-//		assert(running)
-		new ExecutorState(tasks.:+(waiter), running, numTasks, numWaiters + 1)
-	}
-
-	def park() = {
-		// assert(running)
-		new ExecutorState(tasks, false, numTasks, numWaiters)
-	}
+	type ExecutorState = Int
+	def empty: ExecutorState = 0
+	def hasTasks(state: ExecutorState) = state != 0
+	def isEmpty(state: ExecutorState) = state == 0
+	def hasSpace(state: ExecutorState, capacity: Int) = state < capacity
 }

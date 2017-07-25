@@ -13,17 +13,6 @@ trait UnitOfWork[A] {
 	protected def reportSuccess(result: A): Unit
 	protected def reportFailure(error: Throwable): Unit
 
-	final def enqueue(state:ExecutorState) = {
-		if (state.hasSpace(bufLen)) {
-			state.enqueueTask(this)
-		} else {
-			// we actually want to lose this commit race if we're fighting with the run thread
-			LockSupport.parkNanos(1000)
-			// this.prepareForAsyncEnqueue()
-			state.enqueueWaiter(this)
-		}
-	}
-
 	final def run() = {
 		try {
 			reportSuccess(fn())

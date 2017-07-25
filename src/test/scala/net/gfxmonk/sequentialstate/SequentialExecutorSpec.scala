@@ -12,7 +12,7 @@ object SequentialExecutorSpec {
 		var count = new Ctx.Count
 		val ex = new SequentialExecutor(bufLen)
 
-		def awaitAll[A](futures: List[Future[A]], seconds:Int = 1) =
+		def awaitAll[A](futures: List[Future[A]], seconds:Int = 10) =
 			Await.result(Future.sequence(futures), seconds.seconds)
 
 		def queuedRunLoops = {
@@ -79,14 +79,14 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 		val ctx = Ctx.withManualExecution(3); import ctx._
 		val futures = List.fill(4)(ex.enqueueAsync(inc()))
 
+		assert(futures.map(_.isCompleted) == List(true, true, true, false))
+
 		assert(ec.queue.length == 1)
 		ec.queue(0).run()
 
-		assert(futures.map(_.isCompleted) == List(true, true, true, false))
-
 		// extra enqueue was submitted
-		assert(ec.queue.length == 2)
-		ec.queue(1).run()
+//		assert(ec.queue.length == 2)
+//		ec.queue(1).run()
 
 		assert(futures.map(_.isCompleted) == List(true, true, true, true))
 	}
@@ -94,10 +94,11 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 	it("runs queued jobs in a single execution") {
 		val ctx = Ctx.withManualExecution(3); import ctx._
 		val futures = List.fill(3)(ex.enqueueAsync(inc()))
+		assert(futures.map(_.isCompleted) == List(true, true, true))
 
 		ec.queue.head.run()
 
-		assert(futures.map(_.isCompleted) == List(true, true, true))
+		assert(futures.map(_.value.get.get.isCompleted) == List(true, true, true))
 		assert(futures.map(_.value.get.get.value.get.get) == List(1, 2, 3))
 		assert(ec.queue.length == 1)
 	}

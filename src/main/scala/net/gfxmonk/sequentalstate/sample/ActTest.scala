@@ -5,10 +5,11 @@ import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
 import java.util.concurrent.{Executors, TimeUnit, ForkJoinPool}
+import java.util.concurrent.locks.LockSupport
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration._
 import scala.concurrent._
 import scala.util._
 
@@ -18,13 +19,31 @@ import akka.stream.{Materializer,ActorMaterializer}
 object Sleep {
 	def jittered(base: Float, jitter: Float) = {
 		val jitterMs = (Random.nextFloat() * base * jitter)
-		val sleepMs = Math.max(0, (base + jitterMs).toInt)
+		val sleepMs = Math.max(0.0, (base + jitterMs))
 
 		// var limit = sleepMs
 		// while(limit > 0) {
 		//	limit -= 1
 		// }
-		Thread.sleep(sleepMs)
+		LockSupport.parkNanos((sleepMs * 1000).toInt)
+		// Thread.sleep(sleepMs)
+	}
+}
+
+object Stats {
+	def mean(xs: List[Int]): Double = xs match {
+		case Nil => 0.0
+		case ys => ys.reduceLeft(_ + _) / ys.size.toDouble
+	}
+
+	def stddev(xs: List[Int]): Double = xs match {
+		case Nil => 0.0
+		case ys => {
+			val avg = Stats.mean(xs)
+			math.sqrt((0.0 /: ys) { (a,e) =>
+				a + math.pow(e - avg, 2.0)
+			} / xs.size)
+		}
 	}
 }
 
@@ -76,7 +95,7 @@ object CounterActor {
 class CounterState()(implicit ec: ExecutionContext) {
 	private val state = SequentialState(0)
 	def inc() = state.sendTransform{
-		Thread.sleep(1)
+		// Thread.sleep(1)
 		_+1
 	}
 	def dec() = state.sendTransform(_-1)
@@ -203,19 +222,13 @@ class PipelineStage[T,R](
 	}
 }
 
+case class PipelineConfig(stages: Int, len: Int, bufLen: Int, parallelism: Int, timePerStep: Float, jitter: Float)
 object Pipeline {
-	def run(
-		stages: Int,
-		len:Int,
-		bufLen: Int,
-		parallelism: Int,
-		timePerStep: Float,
-		jitter: Float
-	)(implicit ec: ExecutionContext): Future[Int] = {
-		val threadPool = ActorExample.makeThreadPool(parallelism)
+	def run(conf: PipelineConfig)(implicit ec: ExecutionContext): Future[Int] = {
+		val threadPool = ActorExample.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
-		val source = Iterator.continually { 0 }.take(len)
+		val source = Iterator.continually { 0 }.take(conf.len)
 		val sink = SequentialState(0)
 		val drained = Promise[Int]()
 		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
@@ -240,7 +253,7 @@ object Pipeline {
 		def process(item: Option[Int]):Future[Option[Int]] = {
 			Future({
 				item.map { (item: Int) =>
-					Sleep.jittered(timePerStep, jitter)
+					Sleep.jittered(conf.timePerStep, conf.jitter)
 					item + 1
 				}
 			})(workEc)
@@ -250,7 +263,7 @@ object Pipeline {
 			sink: Function[List[Try[Option[Int]]], Future[Unit]],
 			stages: Int):Function[List[Try[Option[Int]]], Future[Unit]] =
 		{
-			val stage = new PipelineStage(bufLen, process, sink)
+			val stage = new PipelineStage(conf.bufLen, process, sink)
 			def handleBatch(batch: List[Try[Option[Int]]]): Future[Unit] = {
 				batch.foldLeft(Future.successful(())) { (acc, item) =>
 					acc.flatMap { case () =>
@@ -265,7 +278,7 @@ object Pipeline {
 			}
 		}
 
-		val fullPipeline = connect(finalize, stages)
+		val fullPipeline = connect(finalize, conf.stages)
 		def pushWork():Future[Unit] = {
 			if (source.hasNext) {
 				val item = source.next
@@ -281,27 +294,20 @@ object Pipeline {
 		}
 	}
 
-	def runMonix(
-		stages: Int,
-		len: Int,
-		parallelism: Int,
-		timePerStep: Float,
-		bufLen: Int,
-		jitter: Float
-	)(implicit sched: monix.execution.Scheduler):Future[Int] = {
+	def runMonix(conf: PipelineConfig)(implicit sched: monix.execution.Scheduler):Future[Int] = {
 
-		val threadPool = ActorExample.makeThreadPool(parallelism)
+		val threadPool = ActorExample.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		import monix.eval._
 		import monix.reactive._
 		import monix.reactive.OverflowStrategy.BackPressure
 
-		val source = Observable.fromIterator( Iterator.continually { 0 }.take(len) )
+		val source = Observable.fromIterator( Iterator.continually { 0 }.take(conf.len) )
 
 		def process(item: Int):Future[Int] = {
 			Future({
-				Sleep.jittered(timePerStep, jitter)
+				Sleep.jittered(conf.timePerStep, conf.jitter)
 				item + 1
 			})(workEc)
 		}
@@ -309,11 +315,11 @@ object Pipeline {
 		def connect(obs: Observable[Int], stages: Int): Observable[Int] = {
 			if (stages == 0) return obs
 			connect(obs, stages - 1).map(process)
-				.asyncBoundary(OverflowStrategy.BackPressure(bufLen))
+				.asyncBoundary(OverflowStrategy.BackPressure(conf.bufLen))
 				.mapFuture(identity)
 		}
 
-		val pipeline = connect(source, stages)
+		val pipeline = connect(source, conf.stages)
 		val sink = pipeline.consumeWith(Consumer.foldLeft(0)(_ + _))
 
 		val ret = sink.runAsync
@@ -322,12 +328,7 @@ object Pipeline {
 	}
 
 	def runAkka(
-		stages: Int,
-		len: Int,
-		parallelism: Int,
-		timePerStep: Float,
-		bufLen: Int,
-		jitter: Float
+		conf: PipelineConfig
 	)(implicit system: ActorSystem, materializer: Materializer):Future[Int] = {
 		import akka.stream._
 		import akka.stream.scaladsl._
@@ -337,12 +338,12 @@ object Pipeline {
 		import scala.concurrent.duration._
 		import java.nio.file.Paths
 
-		val threadPool = ActorExample.makeThreadPool(parallelism)
+		val threadPool = ActorExample.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		// val promise = Promise[Int]()
 		val source: Source[Option[Int], NotUsed] = Source.fromIterator(() =>
-			Iterator.continually { Some(0) }.take(len)
+			Iterator.continually { Some(0) }.take(conf.len)
 		)
 		val sink = Sink.fold[Int,Option[Int]](0) { (i, token) =>
 			// println(s"after batch $token, size = ${i}")
@@ -352,7 +353,7 @@ object Pipeline {
 		def process(item: Option[Int]):Future[Option[Int]] = {
 			Future({
 				item.map { (item:Int) =>
-					Sleep.jittered(timePerStep, jitter)
+					Sleep.jittered(conf.timePerStep, conf.jitter)
 					item + 1
 				}
 			})(workEc)
@@ -364,11 +365,11 @@ object Pipeline {
 			if (stages == 0) {
 				source
 			} else {
-				connect(source.mapAsync(bufLen)(process), stages - 1)
+				connect(source.mapAsync(conf.bufLen)(process), stages - 1)
 			}
 		}
 
-		val flow = connect(source, stages)
+		val flow = connect(source, conf.stages)
 
 		flow.toMat(sink)(Keep.right).run().map({ ret =>
 			threadPool.shutdown()
@@ -380,8 +381,8 @@ object Pipeline {
 
 object ActorExample {
 	def makeThreadPool(parallelism: Int) = {
-		Executors.newFixedThreadPool(parallelism)
-		// new ForkJoinPool(parallelism)
+		// Executors.newFixedThreadPool(parallelism)
+		new ForkJoinPool(parallelism)
 	}
 
 	val threadPool = makeThreadPool(4)
@@ -436,7 +437,7 @@ object ActorExample {
 		val f = impl
 		// println("(computed)")
 		val result = Try {
-			Await.result(f(), Duration(3, TimeUnit.SECONDS))
+			Await.result(f(), Duration(8, TimeUnit.SECONDS))
 		}
 		if (result.isFailure) {
 			println(result)
@@ -448,27 +449,27 @@ object ActorExample {
 	}
 
 	def repeat(n: Int)(name: String, impls: List[(String, ()=> Future[_])]) {
-		val averages = impls.map { case (name, fn) =>
+		val runStats = impls.map { case (name, fn) =>
 			var attempt = n
-			var accum:Int = n + 1
+			val times = new mutable.Queue[Int]()
 			val results = mutable.Set[Any]()
 			while(attempt>0) {
+				// println(s"$name: $attempt")
 				val (cost,result) = time(fn)
 				results.add(result)
 				if (attempt <= n) {
-					accum += cost
+					times.enqueue(cost)
 				}
 				attempt -= 1
 				Thread.sleep(10)
 			}
-			val avg = accum.toFloat / (n-1).toFloat
-			(name, avg, results)
+			(name, Stats.mean(times.toList).toInt, (times.toList.sorted), results)
 		}
 
 		println(s"\nComparison: $name")
-		averages.foreach { case (name, avg, results) =>
+		runStats.foreach { case (name, avg, stddev, results) =>
 			val result: Any = if (results.size == 1) results.head else "[MULTIPLE ANSWERS] " + results
-			println(s"	${avg.toInt}ms (average): $name computed $result")
+			println(s"	${avg}ms (average, stddev=${stddev}): $name computed $result")
 		}
 	}
 
@@ -477,56 +478,49 @@ object ActorExample {
 		val bufLen = 10
 
 		import akka.actor.ActorSystem
-		implicit val actorSystem = ActorSystem("akka-example")
+		implicit val actorSystem = ActorSystem("akka-example", defaultExecutionContext=Some(ec))
 		implicit val akkaMaterializer = ActorMaterializer()
 
 		val countLimit = 1000
 		repeat("counter", List(
 			"akka counter" -> (() => CounterActor.run(countLimit)),
-			// "seq counter" -> (() => CounterState.run(countLimit)),
+			"seq-unbounded counter" -> (() => CounterState.run(countLimit)),
 			"seq-backpressure counter" -> (() => CounterState.runWithBackpressure(countLimit))
 		))
 
 		// pipeline comparison:
-		val stages = 6
-		val len = 2000
-		val parallelism = 6
-		val timePerStep = 0f
-		val jitter = 0.3f
 		val monixScheduler = monix.execution.Scheduler(ec)
 
-		repeat("pipeline", List(
-			s"Akka: n=$parallelism, t=$timePerStep, x$len pipeline" -> (() => Pipeline.runAkka(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			)),
+		val largePipeline = PipelineConfig(
+			stages = 10,
+			len = 1000,
+			bufLen = bufLen,
+			parallelism = 4,
+			timePerStep = 0.1f,
+			jitter = 0.3f
+		)
 
-			s"SequentialState: n=$parallelism, t=$timePerStep, x$len pipeline" -> (() => Pipeline.run(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			)),
+		def runPipelineComparison(desc: String, conf: PipelineConfig) = {
+			repeat(s"$desc pipeline ($conf)", List(
+				s"* SequentialState" -> (() => Pipeline.run(conf)),
+				s"Akka" -> (() => Pipeline.runAkka(conf))
+				// s"Monix" -> (() => Pipeline.runMonix(conf)(monixScheduler))
+			))
+		}
 
-			s"Monix: n=$parallelism, t=$timePerStep, x$len pipeline" -> (() => Pipeline.runMonix(
-				stages = stages,
-				len = len,
-				bufLen = bufLen,
-				parallelism = parallelism,
-				timePerStep = timePerStep,
-				jitter = jitter
-			)(monixScheduler))
-		))
+		runPipelineComparison("shallow + short", largePipeline.copy(len=100, stages=3))
+		runPipelineComparison("shallow + medium", largePipeline.copy(len=500, stages=3))
+		runPipelineComparison("shallow + long", largePipeline.copy(stages=3))
+		runPipelineComparison("medium", largePipeline.copy(stages=5))
+		runPipelineComparison("large", largePipeline)
+		runPipelineComparison("deep", largePipeline.copy(stages=20, parallelism=2))
 
 		println("Done - shutting down...")
+		Await.result(actorSystem.terminate(), 2.seconds)
+		println("ActorSystem terminated...")
 		threadPool.shutdown()
-		actorSystem.terminate()
+		threadPool.awaitTermination(2, TimeUnit.SECONDS)
+		println("ThreadPool terminated...")
 	}
 }
 

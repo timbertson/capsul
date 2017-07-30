@@ -4,7 +4,14 @@ import java.util.concurrent.locks.LockSupport
 import monix.execution.misc.NonFatal
 import scala.concurrent.{Future, Promise}
 
-trait UnitOfWork[A] {
+trait EnqueueableTask {
+	// Simplification for the scheduler, which doesn't
+	// care about the type parameter in UnitOfWork
+	def enqueuedAsync(): Unit
+	def run(): Unit
+}
+
+trait UnitOfWork[A] extends EnqueueableTask {
 	protected val fn: Function0[A]
 	protected val bufLen: Int
 
@@ -30,7 +37,7 @@ trait UnitOfWork[A] {
 
 object UnitOfWork {
 	trait HasEnqueuePromise[A] {
-		var _enqueuedPromise: Promise[A] = null
+		@volatile var _enqueuedPromise: Promise[A] = null
 		def enqueuedPromise: Promise[A] = {
 			if (_enqueuedPromise == null) {
 				_enqueuedPromise = Promise()

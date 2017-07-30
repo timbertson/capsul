@@ -2,12 +2,8 @@ package net.gfxmonk.sequentialstate
 
 import java.util.concurrent.locks.LockSupport
 
-import monix.execution.atomic.{Atomic, AtomicAny}
+import monix.execution.atomic.Atomic
 
-import org.jctools.queues.{MpscLinkedQueue, MessagePassingQueue}
-import scala.annotation.tailrec
-import scala.collection.immutable.Queue
-import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 
 object SequentialExecutor {
@@ -45,61 +41,61 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val tail = Atomic(nullNode)
 
 	private def enqueue(work: EnqueueableTask):Boolean = {
-		var current = tail.get
-		val updated = new Node(work)
+		var currentTail = tail.get
+		val newTail = new Node(work)
 
 		// may race with other enqueuer threads
-		// var printlnTailCount = 1
-		while(!tail.compareAndSet(current, updated)) {
-			// printlnTailCount += 1
-			current = tail.get
+		var printlnTailCount = 1
+		while(!tail.compareAndSet(currentTail, newTail)) {
+			printlnTailCount += 1
+			if(printlnTailCount > 5) println("printlnTailCount: " + printlnTailCount)
+			currentTail = tail.get
 		}
 
-		if (current == null) {
+		if (currentTail == null) {
 			// we're the first item! runloop is definitely not running
-			queued.set(Queued.single(updated))
-			head.set(updated)
+			queued.set(Queued.single(newTail))
+			head.set(newTail)
 			ec.execute(workLoop)
 			true
 		} else {
 			// nodes must be present in the linked list before adding them to `queued`
 			// (also we want the consumer to see new tasks ASAP)
-			current.next = updated
+			currentTail.next = newTail
 
 			// now update `queued`
-			// var printlnQueueCount = 0
+			var printlnQueueCount = 0
 			while(true) {
-				// printlnQueueCount += 1
+				printlnQueueCount += 1
+				if(printlnQueueCount > 5) println("..ongoing queue attempts: " + printlnQueueCount)
 				val currentQueued = queued.get
 				if (currentQueued.len == bufLen) {
 					// we're at capacity - only the consumer can advance queued
 					// (and it already knows about our new node because we've put it in tail)
 					return false
 				} else {
-					if (currentQueued.node.eq(current)) {
-						// common case: we added a node, and now we can enqueue it
-						if (queued.compareAndSet(currentQueued, currentQueued.add(updated))) {
+					if (currentQueued.node.eq(currentTail)) {
+						// common case: we added a node, and now we can (try to) enqueue it
+						if (queued.compareAndSet(currentQueued, currentQueued.add(newTail))) {
 							// println("queued is now " + (currentQueued.len+1))
 							// if(printlnTailCount > 1 || printlnQueueCount > 1) println("tail attempts: " + printlnTailCount + ", queued attempts = " + printlnQueueCount)
 							return true
-						}
-					} else if (currentQueued.node.eq(updated)) {
-						// runner thread has already enqueued us
-						// println("enqueue(): someone else enqueued...")
+						} // else try again
+					} else if (currentQueued.node.eq(newTail)) {
+						// someone has already enqueued us
 						return true
 					} else {
-						// Either the currentQueued is before us (lagging behind `tail`),
-						if (updated.appearsAfter(currentQueued.node)) {
-							// This means another thread must update `queued` before we can do our bit.
-							// Sleep a little then try again.
-							// println("enqueue(): had a race; sleep")
-							LockSupport.parkNanos(2000)
+						if (newTail.appearsAfter(currentQueued.node)) {
+							// We need `queued` to advance until either we reach buflen or the
+							// task we added, and any thread knows enough to do that. Give it a go,
+							// but don't retry if someone beats us to it.
+							val _:Boolean = queued.compareAndSet(currentQueued, currentQueued.add(currentQueued.node.next))
 						} else {
 							// OR, there are two possibilities:
-							//  - the queue has advanced past us
+							//  - queued has advanced past newTail
 							//  - the entire stack that we were added to has been completed,
 							//    and queued is now a new stack
-							// In either case we've definitely been queued
+							// Either way, we were certainly enqueued.
 							// println("enqueue(): queued advanced past us; skipping")
 							return true
 						}
@@ -116,14 +112,17 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// println("start")
 			var maxIterations = 200
 
-			var headNode = head.get
+			val headNode = head.get
 
 			var node = headNode
 			while(maxIterations > 0) {
 				node.item.run()
 				maxIterations -= 1
 
+				var printlnNullifyTailAttempts = 0
 				while (node.next == null) {
+					printlnNullifyTailAttempts += 1
+					if(printlnNullifyTailAttempts>5) println("tail nullify attempts: " + printlnNullifyTailAttempts)
 					// looks like we've hit the tail.
 					if (tail.compareAndSet(node, null)) {
 						// yeah, that was the last item.
@@ -139,13 +138,18 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 						// println("spin() node.next")
 						// `node` isn't really the tail, so we just need to spin, waiting for
 						// its `.next` property to be set
+						Thread.`yield`()
+//						LockSupport.parkNanos(0)
 					}
 				}
 				node = node.next
 
 				// update queued
 				var updated = false
+				var printlnUpdatedCount = 0
 				while (!updated) {
+					printlnUpdatedCount += 1
+					if (printlnUpdatedCount > 5) println("runner queued update count: " + printlnUpdatedCount)
 					val currentQueued = queued.get
 					if (currentQueued.len == bufLen) {
 						// we're at capacity, only this thread can advance it (just use `set`)

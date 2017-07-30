@@ -36,6 +36,11 @@ object Stats {
 		case ys => ys.reduceLeft(_ + _) / ys.size.toDouble
 	}
 
+	def median(xs: List[Int]): Int = xs match {
+		case Nil => 0
+		case ys => ys.sorted.apply(ys.size/2)
+	}
+
 	def stddev(xs: List[Int]): Double = xs match {
 		case Nil => 0.0
 		case ys => {
@@ -454,7 +459,7 @@ object ActorExample {
 			val times = new mutable.Queue[Int]()
 			val results = mutable.Set[Any]()
 			while(attempt>0) {
-				// println(s"$name: $attempt")
+//				 println(s"$name: begin attempt $attempt")
 				val (cost,result) = time(fn)
 				results.add(result)
 				if (attempt <= n) {
@@ -463,25 +468,25 @@ object ActorExample {
 				attempt -= 1
 				Thread.sleep(10)
 			}
-			(name, Stats.mean(times.toList).toInt, (times.toList.sorted), results)
+			(name, Stats.median(times.toList), Stats.mean(times.toList).toInt, (times.toList.sorted), results)
 		}
 
 		println(s"\nComparison: $name")
-		runStats.foreach { case (name, avg, stddev, results) =>
+		runStats.foreach { case (name, median, avg, runs, results) =>
 			val result: Any = if (results.size == 1) results.head else "[MULTIPLE ANSWERS] " + results
-			println(s"	${avg}ms (average, stddev=${stddev}): $name computed $result")
+			println(s"	${avg}ms mean, ${avg}ms average, runs=${runs.toSet.toList.sorted}: $name computed $result")
 		}
 	}
 
 	def run(): Unit = {
-		val repeat = this.repeat(5) _
+		val repeat = this.repeat(20) _
 		val bufLen = 10
 
 		import akka.actor.ActorSystem
 		implicit val actorSystem = ActorSystem("akka-example", defaultExecutionContext=Some(ec))
 		implicit val akkaMaterializer = ActorMaterializer()
 
-		val countLimit = 1000
+		val countLimit = 10000
 		repeat("counter", List(
 			"akka counter" -> (() => CounterActor.run(countLimit)),
 			"seq-unbounded counter" -> (() => CounterState.run(countLimit)),

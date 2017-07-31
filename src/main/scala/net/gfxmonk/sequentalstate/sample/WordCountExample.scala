@@ -1,4 +1,4 @@
-package net.gfxmonk.sequentialstate.example.wordcount
+package net.gfxmonk.sequentialstate.example
 import net.gfxmonk.sequentialstate._
 
 import monix.eval.Task

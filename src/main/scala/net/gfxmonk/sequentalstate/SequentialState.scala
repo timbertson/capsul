@@ -21,6 +21,9 @@ object SequentialState {
 	def apply[T](v: T)(implicit ec: ExecutionContext) =
 		new SequentialState[T](v, SequentialExecutor())
 
+	def apply[T](v: T, bufLen: Int)(implicit ec: ExecutionContext) =
+		new SequentialState[T](v, SequentialExecutor(bufLen))
+
 	def apply[T](v: T, thread: SequentialExecutor)(implicit ec: ExecutionContext) =
 		new SequentialState[T](v, thread)
 }

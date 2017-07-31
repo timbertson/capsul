@@ -138,8 +138,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 						// println("spin() node.next")
 						// `node` isn't really the tail, so we just need to spin, waiting for
 						// its `.next` property to be set
-						Thread.`yield`()
-//						LockSupport.parkNanos(0)
+						// Thread.`yield`()
+						LockSupport.parkNanos(100)
 					}
 				}
 				node = node.next

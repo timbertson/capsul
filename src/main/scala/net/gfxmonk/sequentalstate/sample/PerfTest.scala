@@ -20,13 +20,7 @@ object Sleep {
 	def jittered(base: Float, jitter: Float) = {
 		val jitterMs = (Random.nextFloat() * base * jitter)
 		val sleepMs = Math.max(0.0, (base + jitterMs))
-
-		// var limit = sleepMs
-		// while(limit > 0) {
-		//	limit -= 1
-		// }
 		LockSupport.parkNanos((sleepMs * 1000).toInt)
-		// Thread.sleep(sleepMs)
 	}
 }
 
@@ -52,14 +46,14 @@ object Stats {
 	}
 }
 
-class SampleActorWordCount(implicit sched: ExecutionContext) {
+class SampleWordCountState(implicit sched: ExecutionContext) {
 	val state = SequentialState(0)
 	def feed(line: String) = state.sendTransform(_ + line.split("\\w").length)
 	def reset() = state.sendSet(0)
 	def current = state.current
 }
 
-class SampleCountingActor()(implicit ec: ExecutionContext) {
+class SampleCountingState()(implicit ec: ExecutionContext) {
 	val state = SequentialState(v = 0)
 	def inc() = state.sendTransform(_ + 1)
 	def current = state.current
@@ -131,37 +125,6 @@ object CounterState {
 	}
 }
 
-class PingPongActor()(implicit ec: ExecutionContext) {
-	var peer: PingPongActor = null
-	val state = SequentialState[List[Int]](v = Nil)
-	def setPeer(newPeer: PingPongActor) {
-		peer = newPeer
-	}
-	def ping(n: Int): Future[Unit] = {
-		state.sendTransform(n :: _).flatMap { case () =>
-			if (n == 1) {
-				Future.successful(())
-			} else {
-				peer.ping(n-1)
-			}
-		}
-	}
-
-	def get:Future[List[Int]] = state.current
-}
-
-object PingPongActor {
-	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
-		val a = new PingPongActor()
-		val b = new PingPongActor()
-		a.setPeer(b)
-		b.setPeer(a)
-		a.ping(n).flatMap { case () =>
-			a.get.zip(b.get).map { case (a,b) => a.size + b.size }
-		}
-	}
-}
-
 
 class PipelineStage[T,R](
 	bufLen: Int,
@@ -190,7 +153,7 @@ class PipelineStage[T,R](
 					state.queue.dequeue()
 				}
 				case _ => {
-					if (!ret.isEmpty) {
+					if (ret.nonEmpty) {
 						// we have some items to produce
 						val fut = handleCompleted(ret.toList)
 						state.outgoing = Some(fut)
@@ -230,7 +193,7 @@ class PipelineStage[T,R](
 case class PipelineConfig(stages: Int, len: Int, bufLen: Int, parallelism: Int, timePerStep: Float, jitter: Float)
 object Pipeline {
 	def run(conf: PipelineConfig)(implicit ec: ExecutionContext): Future[Int] = {
-		val threadPool = ActorExample.makeThreadPool(conf.parallelism)
+		val threadPool = PerfExample.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		val source = Iterator.continually { 0 }.take(conf.len)
@@ -301,7 +264,7 @@ object Pipeline {
 
 	def runMonix(conf: PipelineConfig)(implicit sched: monix.execution.Scheduler):Future[Int] = {
 
-		val threadPool = ActorExample.makeThreadPool(conf.parallelism)
+		val threadPool = PerfExample.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		import monix.eval._
@@ -338,20 +301,15 @@ object Pipeline {
 		import akka.stream._
 		import akka.stream.scaladsl._
 		import akka.{ NotUsed, Done }
-		import akka.util.ByteString
 		import scala.concurrent._
-		import scala.concurrent.duration._
-		import java.nio.file.Paths
 
-		val threadPool = ActorExample.makeThreadPool(conf.parallelism)
+		val threadPool = PerfExample.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
-		// val promise = Promise[Int]()
 		val source: Source[Option[Int], NotUsed] = Source.fromIterator(() =>
 			Iterator.continually { Some(0) }.take(conf.len)
 		)
 		val sink = Sink.fold[Int,Option[Int]](0) { (i, token) =>
-			// println(s"after batch $token, size = ${i}")
 			i + token.getOrElse(0)
 		}
 
@@ -384,7 +342,7 @@ object Pipeline {
 
 }
 
-object ActorExample {
+object PerfExample {
 	def makeThreadPool(parallelism: Int) = {
 		// Executors.newFixedThreadPool(parallelism)
 		new ForkJoinPool(parallelism)
@@ -398,7 +356,7 @@ object ActorExample {
 	}.take(n)
 
 	def simpleCounter(limit: Int): Future[Int] = {
-		val lineCount = new SampleCountingActor()
+		val lineCount = new SampleCountingState()
 		def loop(i: Int): Future[Int] = {
 			lineCount.inc().flatMap { _: Unit =>
 				val nextI = i+1
@@ -413,15 +371,13 @@ object ActorExample {
 	}
 
 	def countWithSequentialStates(lines: Iterator[String]): Future[(Int,Int)] = {
-		val wordCounter = new SampleActorWordCount()
-		val lineCount = new SampleCountingActor()
+		val wordCounter = new SampleWordCountState()
+		val lineCount = new SampleCountingState()
 		def loop(): Future[(Int, Int)] = {
 			if (lines.hasNext) {
 				for {
 					_: Unit <- wordCounter.feed(lines.next())
 					_: Unit <- lineCount.inc()
-					// XXX potentially no need to wait until the last round?
-					// result <- numWords.zip(numLines).flatMap(_ => loop())
 					result <- loop()
 				} yield result
 			} else {
@@ -529,18 +485,18 @@ object ActorExample {
 	}
 }
 
-object PerfRun {
+object LongLivedLoop {
 	def main(): Unit = {
-		val threadPool = ActorExample.makeThreadPool(4)
+		val threadPool = PerfExample.makeThreadPool(4)
 		implicit val ec = ExecutionContext.fromExecutor(threadPool)
 		Await.result(CounterState.run(Int.MaxValue), Duration.Inf)
 	}
 }
 
 
-object ActTest {
+object PerfTest {
 	def main():Unit = {
-		ActorExample.run
-//		PerfRun.main()
+		PerfExample.run
+//		LongLivedLoop.main()
 	}
 }

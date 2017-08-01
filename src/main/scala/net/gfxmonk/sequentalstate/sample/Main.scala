@@ -1,7 +1,7 @@
 package net.gfxmonk.sequentialstate.example
 
 object Main extends App {
-	// MonixTest.main()
 	wordcount.ExampleMain.main()
-	ActTest.main()
+	async.ExampleMain.main()
+	PerfTest.main()
 }

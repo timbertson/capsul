@@ -1,6 +1,5 @@
 package net.gfxmonk.sequentialstate.example.wordcount
 import net.gfxmonk.sequentialstate._
-
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
@@ -11,12 +10,12 @@ import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent._
 import scala.util._
-
-import akka.actor.{ActorSystem,Actor}
-import akka.stream.{Materializer,ActorMaterializer}
+import akka.actor.{Actor, ActorSystem}
+import akka.stream.{ActorMaterializer, Materializer}
 import akka.actor.Props
 import akka.pattern.ask
 import akka.util.Timeout
+import net.gfxmonk.sequentalstate.sample.FutureUtils
 
 import scala.concurrent.ExecutionContext.Implicits.global
 
@@ -52,14 +51,15 @@ object StateBased {
 		val wordCounter = new WordCounter()
 		val counter = new Counter()
 
-		val counted = lines.foldLeft(Future.successful(())) { (future, line) =>
+		// send off all our counting actions
+		val counted = FutureUtils.foldLeft((), lines) ((_:Unit, line) => {
 			for {
-				() <- future
 				() <- wordCounter.add(line)
 				() <- counter.inc()
 			} yield ()
-		}
+		})
 
+		// once all actions have been sent, request the final numbers
 		for {
 			() <- counted
 			words <- wordCounter.get

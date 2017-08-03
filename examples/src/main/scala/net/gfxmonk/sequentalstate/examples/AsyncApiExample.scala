@@ -1,10 +1,10 @@
-package net.gfxmonk.sequentialstate.example.async
+package net.gfxmonk.sequentialstate.examples.async
 import akka.actor.{Actor, ActorSystem, Props}
 import akka.pattern.ask
 import akka.util.Timeout
 import monix.eval.TaskSemaphore
 import monix.execution.Scheduler.Implicits.global
-import net.gfxmonk.sequentalstate.sample.FutureUtils
+import net.gfxmonk.sequentalstate.examples.FutureUtils
 import net.gfxmonk.sequentialstate._
 
 import scala.collection.immutable.Queue

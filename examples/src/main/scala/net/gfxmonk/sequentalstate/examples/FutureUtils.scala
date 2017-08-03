@@ -1,4 +1,4 @@
-package net.gfxmonk.sequentalstate.sample
+package net.gfxmonk.sequentalstate.examples
 
 import scala.concurrent.{ExecutionContext, Future}
 

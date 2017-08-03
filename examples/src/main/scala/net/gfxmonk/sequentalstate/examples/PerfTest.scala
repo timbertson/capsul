@@ -1,4 +1,4 @@
-package net.gfxmonk.sequentialstate.example
+package net.gfxmonk.sequentialstate.examples
 import net.gfxmonk.sequentialstate._
 
 import monix.eval.Task

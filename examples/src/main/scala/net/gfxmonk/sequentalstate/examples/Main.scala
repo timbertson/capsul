@@ -1,4 +1,4 @@
-package net.gfxmonk.sequentialstate.example
+package net.gfxmonk.sequentialstate.examples
 
 object Main extends App {
 	wordcount.ExampleMain.main()

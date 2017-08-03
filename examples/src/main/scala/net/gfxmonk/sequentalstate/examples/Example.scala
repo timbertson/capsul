@@ -1,4 +1,4 @@
-package net.gfxmonk.sequentialstate.example.wordcount
+package net.gfxmonk.sequentialstate.examples.wordcount
 import net.gfxmonk.sequentialstate._
 import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
@@ -15,7 +15,7 @@ import akka.stream.{ActorMaterializer, Materializer}
 import akka.actor.Props
 import akka.pattern.ask
 import akka.util.Timeout
-import net.gfxmonk.sequentalstate.sample.FutureUtils
+import net.gfxmonk.sequentalstate.examples.FutureUtils
 
 import scala.concurrent.ExecutionContext.Implicits.global
 

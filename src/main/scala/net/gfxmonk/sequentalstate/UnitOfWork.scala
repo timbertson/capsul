@@ -3,6 +3,7 @@ package net.gfxmonk.sequentialstate
 import monix.execution.misc.NonFatal
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.util.{Try,Success,Failure}
 
 trait EnqueueableTask {
 	// Simplification for the scheduler, which doesn't
@@ -89,26 +90,27 @@ object UnitOfWork {
 		}
 	}
 
-	case class FullAsync[A](fn: Function0[Future[A]])(implicit ec: ExecutionContext)
-		extends UnitOfWork[Future[A]]
+	case class FullAsync[A](fn: Function0[Future[Future[A]]])(implicit ec: ExecutionContext)
+		extends UnitOfWork[Future[Future[A]]]
 			with HasEnqueuePromise[Future[A]]
 			with HasResultPromise[A]
 	{
 		// ignore enqueues; we wait until the outer result future has been resolved
 		final def enqueuedAsync(): Unit = ()
 
-		private def attachAsyncResult(result: Future[A]): Unit = {
-			result.onComplete(resultPromise.complete)
-		}
-
-		final def reportSuccess(result: Future[A]): Unit = {
-			enqueuedPromise.success(result)
-			attachAsyncResult(result)
+		final def reportSuccess(result: Future[Future[A]]): Unit = {
+			result.onComplete { result =>
+				enqueuedPromise.success(resultPromise.future)
+				result match {
+					case Success(f) => f.onComplete(resultPromise.complete)
+					case Failure(e) => resultPromise.failure(e)
+				}
+			}
 		}
 
 		final def reportFailure(error: Throwable): Unit = {
-			// Make sure all failures happen as results, not enqueue
-			attachAsyncResult(Future.failed(error))
+			// Make sure all failures happen as results, not enqueue errors
+			reportSuccess(Future.successful(Future.failed(error)))
 		}
 	}
 
@@ -122,12 +124,18 @@ object UnitOfWork {
 		}
 	}
 
-	case class EnqueueOnlyAsync(fn: Function0[Future[Unit]])(implicit ec: ExecutionContext)
-		extends UnitOfWork[Future[Unit]]
+	case class EnqueueOnlyAsync[A](fn: Function0[Future[Future[A]]])(implicit ec: ExecutionContext)
+		extends UnitOfWork[Future[Future[A]]]
 		with HasEnqueuePromise[Unit]
-		with IgnoresResult[Future[Unit]]
 	{
-		override def enqueuedAsync(): Unit = {
+		// ignore enqueues; we wait until the outer result future has been resolved
+		final def enqueuedAsync(): Unit = ()
+
+		final def reportSuccess(send: Future[Future[A]]): Unit = {
+			send.onComplete((result:Try[Future[A]]) => enqueuedPromise.success(()))
+		}
+
+		final def reportFailure(error: Throwable): Unit = {
 			enqueuedPromise.success(())
 		}
 	}

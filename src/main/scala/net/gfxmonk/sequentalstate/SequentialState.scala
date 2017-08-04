@@ -59,8 +59,8 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def sendAccess(fn: Function[T,_]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => fn(state.current)))
 
-	def sendAccessAsync[A](fn: Function[T,Future[A]])(implicit ec: ExecutionContext): Future[Unit] =
-		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current).map(_ => ())))
+	def sendAccessAsync[A](fn: Function[T,Future[Future[A]]])(implicit ec: ExecutionContext): Future[Unit] =
+		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
 	// == send* ==
 
@@ -92,9 +92,9 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def rawAccess[R](fn: Function[T,R]): Future[Future[R]] =
 		thread.enqueueRaw(UnitOfWork.Full(() => fn(state.current)))
 
-	def rawMutateAsync[R](fn: Function[Ref[T],Future[R]])(implicit ec: ExecutionContext): Future[Future[R]] =
+	def rawMutateAsync[R](fn: Function[Ref[T],Future[Future[R]]])(implicit ec: ExecutionContext): Future[Future[R]] =
 		thread.enqueueRaw(new UnitOfWork.FullAsync[R](() => fn(state)))
 
-	def rawAccessAsync[R](fn: Function[T,Future[R]])(implicit ec: ExecutionContext): Future[Future[R]] =
+	def rawAccessAsync[R](fn: Function[T,Future[Future[R]]])(implicit ec: ExecutionContext): Future[Future[R]] =
 		thread.enqueueRaw(new UnitOfWork.FullAsync[R](() => fn(state.current)))
 }

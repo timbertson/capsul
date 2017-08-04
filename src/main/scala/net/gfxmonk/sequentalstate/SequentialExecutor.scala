@@ -181,10 +181,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	def enqueueOnly[R](fun: Function0[R]): Future[Unit] = {
-//		enqueueAsync(fun).map((_:Future[R]) => ())
-
-		val task = UnitOfWork.EnqueueOnly(fun, bufLen)
+	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (enqueue(task)) {
 			SequentialExecutor.successfulUnit
 		} else {
@@ -192,18 +189,17 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	def enqueueReturn[R](fun: Function0[R]): Future[R] = {
-//		enqueueAsync(fun).flatMap(identity)
-
-		val task = UnitOfWork.ReturnOnly(fun, bufLen)
+	def enqueueReturn[R](task: EnqueueableTask with UnitOfWork.HasResultPromise[R]): Future[R] = {
 		enqueue(task)
 		task.resultPromise.future
 	}
 
-	def enqueueAsync[A](fun: Function0[A]): Future[Future[A]] = {
-		val task = UnitOfWork.Full(fun, bufLen)
+	def enqueueRaw[R](
+		task: EnqueueableTask
+			with UnitOfWork.HasEnqueuePromise[Future[R]]
+			with UnitOfWork.HasResultPromise[R]
+	): Future[Future[R]] = {
 		if (enqueue(task)) {
-//			println("immediate!")
 			Future.successful(task.resultPromise.future)
 		} else {
 			task.enqueuedPromise.future

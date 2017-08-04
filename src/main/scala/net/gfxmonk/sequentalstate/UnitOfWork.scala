@@ -1,8 +1,8 @@
 package net.gfxmonk.sequentialstate
 
-import java.util.concurrent.locks.LockSupport
 import monix.execution.misc.NonFatal
-import scala.concurrent.{Future, Promise}
+
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 trait EnqueueableTask {
 	// Simplification for the scheduler, which doesn't
@@ -13,10 +13,8 @@ trait EnqueueableTask {
 
 trait UnitOfWork[A] extends EnqueueableTask {
 	protected val fn: Function0[A]
-	protected val bufLen: Int
 
 	def enqueuedAsync(): Unit
-	// protected def prepareForAsyncEnqueue(): Unit
 	protected def reportSuccess(result: A): Unit
 	protected def reportFailure(error: Throwable): Unit
 
@@ -36,6 +34,15 @@ trait UnitOfWork[A] extends EnqueueableTask {
 }
 
 object UnitOfWork {
+	trait HasExecutionContext {
+		protected val ec: ExecutionContext
+	}
+
+	trait IgnoresResult[A] {
+		final def reportSuccess(result: A): Unit = ()
+		final def reportFailure(err: Throwable): Unit = ()
+	}
+
 	trait HasEnqueuePromise[A] {
 		@volatile var _enqueuedPromise: Promise[A] = null
 		def enqueuedPromise: Promise[A] = {
@@ -48,7 +55,9 @@ object UnitOfWork {
 
 	trait HasResultPromise[A] {
 		val resultPromise: Promise[A] = Promise[A]()
+	}
 
+	trait HasSyncResult[A] { self: HasResultPromise[A] =>
 		final def reportSuccess(result: A): Unit = {
 			resultPromise.success(result)
 		}
@@ -58,31 +67,83 @@ object UnitOfWork {
 		}
 	}
 
-	case class Full[A](fn: Function0[A], bufLen: Int)
+	trait HasAsyncResult[A] { self: HasResultPromise[A] with HasExecutionContext =>
+		final def reportSuccess(result: Future[A]): Unit = {
+			result.onComplete(resultPromise.complete)(ec)
+		}
+
+		final def reportFailure(error: Throwable): Unit = {
+			// Make sure all failures happen as results, not enqueue
+			reportSuccess(Future.failed(error))
+		}
+	}
+
+	case class Full[A](fn: Function0[A])
 		extends UnitOfWork[A]
 		with HasEnqueuePromise[Future[A]]
 		with HasResultPromise[A]
+    with HasSyncResult[A]
 	{
 		final def enqueuedAsync() {
 			enqueuedPromise.success(resultPromise.future)
 		}
 	}
 
-	case class EnqueueOnly[A](fn: Function0[A], bufLen: Int)
-		extends UnitOfWork[A] with HasEnqueuePromise[Unit]
+	case class FullAsync[A](fn: Function0[Future[A]])(implicit ec: ExecutionContext)
+		extends UnitOfWork[Future[A]]
+			with HasEnqueuePromise[Future[A]]
+			with HasResultPromise[A]
 	{
-		final def reportSuccess(result: A): Unit = ()
-		final def reportFailure(error: Throwable): Unit = ()
+		// ignore enqueues; we wait until the outer result future has been resolved
+		final def enqueuedAsync(): Unit = ()
 
+		private def attachAsyncResult(result: Future[A]): Unit = {
+			result.onComplete(resultPromise.complete)
+		}
+
+		final def reportSuccess(result: Future[A]): Unit = {
+			enqueuedPromise.success(result)
+			attachAsyncResult(result)
+		}
+
+		final def reportFailure(error: Throwable): Unit = {
+			// Make sure all failures happen as results, not enqueue
+			attachAsyncResult(Future.failed(error))
+		}
+	}
+
+	case class EnqueueOnly[A](fn: Function0[A])
+		extends UnitOfWork[A]
+		with HasEnqueuePromise[Unit]
+		with IgnoresResult[A]
+	{
 		final def enqueuedAsync() {
 			enqueuedPromise.success(())
 		}
 	}
 
-	case class ReturnOnly[A](fn: Function0[A], bufLen: Int)
-		extends UnitOfWork[A] with HasResultPromise[A]
+	case class EnqueueOnlyAsync(fn: Function0[Future[Unit]])(implicit ec: ExecutionContext)
+		extends UnitOfWork[Future[Unit]]
+		with HasEnqueuePromise[Unit]
+		with IgnoresResult[Future[Unit]]
 	{
-		// final def prepareForAsyncEnqueue(): Unit = ()
+		override def enqueuedAsync(): Unit = {
+			enqueuedPromise.success(())
+		}
+	}
+
+	case class ReturnOnly[A](fn: Function0[A])
+		extends UnitOfWork[A] with HasResultPromise[A] with HasSyncResult[A]
+	{
+		final def enqueuedAsync(): Unit = ()
+	}
+
+	case class ReturnOnlyAsync[A](fn: Function0[Future[A]])(implicit val ec: ExecutionContext)
+		extends UnitOfWork[Future[A]]
+		with HasResultPromise[A]
+		with HasExecutionContext
+		with HasAsyncResult[A]
+	{
 		final def enqueuedAsync(): Unit = ()
 	}
 }

@@ -19,8 +19,8 @@ object SequentialExecutorSpec {
 			ec.queue.filter(_ == ex.workLoop)
 		}
 
-		def inc(sleep: Int = 10): Function0[Int] = {
-			() => {
+		def inc(sleep: Int = 10): UnitOfWork.Full[Int] = {
+			UnitOfWork.Full(() => {
 				assert(count.busy == false)
 				val initial = count.current
 				count.busy = true
@@ -29,7 +29,7 @@ object SequentialExecutorSpec {
 				count.current = initial + 1
 				count.busy = false
 				count.current
-			}
+			})
 		}
 	}
 
@@ -71,13 +71,13 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 
 	it("delays job enqueue once capacity is reached") {
 		val ctx = Ctx.withManualExecution(3); import ctx._
-		val futures = List.fill(4)(ex.enqueueAsync(inc()))
+		val futures = List.fill(4)(ex.enqueueRaw(inc()))
 		assert(futures.map(_.isCompleted) == List(true, true, true, false))
 	}
 
 	it("enqueues waiting jobs upon task completion") {
 		val ctx = Ctx.withManualExecution(3); import ctx._
-		val futures = List.fill(4)(ex.enqueueAsync(inc()))
+		val futures = List.fill(4)(ex.enqueueRaw(inc()))
 
 		assert(futures.map(_.isCompleted) == List(true, true, true, false))
 
@@ -93,7 +93,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 
 	it("runs queued jobs in a single execution") {
 		val ctx = Ctx.withManualExecution(3); import ctx._
-		val futures = List.fill(3)(ex.enqueueAsync(inc()))
+		val futures = List.fill(3)(ex.enqueueRaw(inc()))
 		assert(futures.map(_.isCompleted) == List(true, true, true))
 
 		ec.queue.head.run()

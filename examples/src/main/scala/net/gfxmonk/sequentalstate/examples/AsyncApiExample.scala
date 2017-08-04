@@ -32,22 +32,22 @@ object StateBased {
 		// actual requests are allowed at any point.
 		private val state = SequentialState(mutable.Map[String,Future[Future[String]]]())
 		private val apiSemaphore = TaskSemaphore(5)
-		def get(resource: String): Future[Future[String]] = state.awaitAccess(cache => {
+		def get(resource: String): Future[Future[String]] = state.awaitAccessAsync(cache => {
 			cache.get(resource) match {
 				case Some(cached) => cached
 				case None => {
 					// Break up response into an outer future which resolves once the request has been
 					// accepted, and an inner future (the result) in order to maintain backpressure
-					val future = apiSemaphore.acquire.runAsync.map(_ => {
+					val future = apiSemaphore.acquire.runAsync.map { case () => {
 						val result = Api.get(resource)
 						result.onComplete(_ => apiSemaphore.release.runAsync)
 						result
-					})
+					}}
 					cache.update(resource, future)
 					future
 				}
 			}
-		}).flatMap(identity)
+		})
 	}
 
 	def downloadAll(resources: Iterable[String]): Future[List[String]] = {
@@ -72,7 +72,7 @@ object ActorBased {
 		private val cache = mutable.Map[String,Future[Future[String]]]()
 		def receive = {
 			// note: doesn't allow for any queueing above what `apiSemaphore` allows,
-			// so cached results are effectly served synchronously
+			// so requests for cached results are not buffered
 			case Request(resource:String) => cache.get(resource) match {
 				case Some(cached) => sender ! cached
 				case None => {

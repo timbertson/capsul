@@ -442,7 +442,7 @@ object PerfExample {
 		implicit val actorSystem = ActorSystem("akka-example", defaultExecutionContext=Some(ec))
 		implicit val akkaMaterializer = ActorMaterializer()
 
-		val countLimit = 10000
+		val countLimit = 1000
 		repeat("counter", List(
 			"akka counter" -> (() => CounterActor.run(countLimit)),
 			"seq-unbounded counter" -> (() => CounterState.run(countLimit)),

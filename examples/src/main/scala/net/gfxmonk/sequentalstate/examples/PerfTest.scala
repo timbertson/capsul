@@ -430,7 +430,7 @@ object PerfExample {
 		println(s"\nComparison: $name")
 		runStats.foreach { case (name, median, avg, runs, results) =>
 			val result: Any = if (results.size == 1) results.head else "[MULTIPLE ANSWERS] " + results
-			println(s"	${avg}ms mean, ${avg}ms average, runs=${runs.toSet.toList.sorted}: $name computed $result")
+			println(s"	${avg}ms mean, ${median}ms median, runs=${runs.toSet.toList.sorted}: $name computed $result")
 		}
 	}
 

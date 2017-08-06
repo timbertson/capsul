@@ -4,8 +4,9 @@ import akka.pattern.ask
 import akka.util.Timeout
 import monix.eval.TaskSemaphore
 import monix.execution.Scheduler.Implicits.global
-import net.gfxmonk.sequentalstate.examples.FutureUtils
+import net.gfxmonk.sequentialstate.examples.FutureUtils
 import net.gfxmonk.sequentialstate._
+import net.gfxmonk.sequentialstate.staged._
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -31,7 +32,7 @@ object StateBased {
 				val prefixed = prefix + value
 				next match {
 					case Some(prefixer) => prefixer.prefix(prefixed)
-					case None => Backpressured.successful(prefixed)
+					case None => StagedFuture.successful(prefixed)
 				}
 			})
 		}
@@ -61,7 +62,7 @@ object StateBased {
 			() <- a.initPrefix("a ")
 			() <- b.initPrefix("then b ")
 			() <- c.initPrefix("then c:")
-			result <- Backpressured.result(c.prefix(value))
+			result <- c.prefix(value).resolved
 		} yield result
 	}
 
@@ -74,7 +75,7 @@ object StateBased {
 			() <- a.initPrefix("a ")
 			() <- b.initPrefix("then b ")
 			() <- c.initPrefix("then c:")
-			result <- Backpressured.result(c.prefixAsync(value))
+			result <- c.prefixAsync(value).resolved
 		} yield result
 	}
 }

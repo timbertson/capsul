@@ -4,7 +4,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import monix.eval.TaskSemaphore
 import monix.execution.Scheduler.Implicits.global
-import net.gfxmonk.sequentalstate.examples.FutureUtils
+import net.gfxmonk.sequentialstate.examples.FutureUtils
 import net.gfxmonk.sequentialstate._
 
 import scala.collection.immutable.Queue

@@ -15,7 +15,7 @@ import akka.stream.{ActorMaterializer, Materializer}
 import akka.actor.Props
 import akka.pattern.ask
 import akka.util.Timeout
-import net.gfxmonk.sequentalstate.examples.FutureUtils
+import net.gfxmonk.sequentialstate.examples.FutureUtils
 
 import scala.concurrent.ExecutionContext.Implicits.global
 

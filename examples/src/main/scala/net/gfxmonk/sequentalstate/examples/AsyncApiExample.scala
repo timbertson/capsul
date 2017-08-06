@@ -6,6 +6,7 @@ import monix.eval.TaskSemaphore
 import monix.execution.Scheduler.Implicits.global
 import net.gfxmonk.sequentialstate.examples.FutureUtils
 import net.gfxmonk.sequentialstate._
+import net.gfxmonk.sequentialstate.staged._
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -30,15 +31,15 @@ object StateBased {
 	class Cache() {
 		// Provides a cache in front of API requests, 5 of which
 		// actual requests are allowed at any point.
-		private val state = SequentialState(mutable.Map[String,Future[Future[String]]]())
+		private val state = SequentialState(mutable.Map[String,StagedFuture[String]]())
 		private val apiSemaphore = TaskSemaphore(5)
-		def get(resource: String): Future[Future[String]] = state.awaitAccessAsync(cache => {
+		def get(resource: String): StagedFuture[String] = state.rawAccessStaged(cache => {
 			cache.get(resource) match {
 				case Some(cached) => cached
 				case None => {
-					// Break up response into an outer future which resolves once the request has been
-					// accepted, and an inner future (the result) in order to maintain backpressure
-					val future = apiSemaphore.acquire.runAsync.map { case () => {
+					// acceptMap maintains an outer future which represents work acceptance,
+					// and an inner future (the result) in order to maintain backpressure
+					val future = apiSemaphore.acquire.runAsync.acceptMap { case () => {
 						val result = Api.get(resource)
 						result.onComplete(_ => apiSemaphore.release.runAsync)
 						result
@@ -57,7 +58,7 @@ object StateBased {
 		// ready now, or they may be in-flight.
 		val fetches: Future[Queue[Future[String]]] =
 			FutureUtils.foldLeft(Queue.empty[Future[String]], resources) {
-				(accum, resource) => cache.get(resource).map(x => accum.enqueue(x))
+				(accum, resource) => cache.get(resource).accepted.map(x => accum.enqueue(x))
 			}
 
 		fetches.flatMap(fs => Future.sequence(fs).map(_.toList))
@@ -69,14 +70,14 @@ object ActorBased {
 	class Cache extends Actor {
 		import Cache._
 		private val apiSemaphore = TaskSemaphore(5)
-		private val cache = mutable.Map[String,Future[Future[String]]]()
+		private val cache = mutable.Map[String,StagedFuture[String]]()
 		def receive = {
 			// note: doesn't allow for any queueing above what `apiSemaphore` allows,
 			// so requests for cached results are not buffered
 			case Request(resource:String) => cache.get(resource) match {
 				case Some(cached) => sender ! cached
 				case None => {
-					val future = apiSemaphore.acquire.runAsync.map(_ => {
+					val future = apiSemaphore.acquire.runAsync.acceptMap(_ => {
 						val result = Api.get(resource)
 						result.onComplete(_ => apiSemaphore.release.runAsync)
 						result
@@ -101,8 +102,8 @@ object ActorBased {
 		val fetches: Future[Queue[Future[String]]] = FutureUtils.foldLeft(Queue.empty[Future[String]], resources)(
 			(accum, resource) => {
 				for {
-					response <- (cache ? Cache.Request(resource)).mapTo[Future[Future[String]]]
-					fetch <- response
+					response <- (cache ? Cache.Request(resource)).mapTo[StagedFuture[String]]
+					fetch <- response.accepted
 				} yield accum.enqueue(fetch)
 			}
 		)

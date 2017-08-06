@@ -4,9 +4,14 @@ import scala.concurrent._
 import scala.util._
 
 package object staged {
-	implicit class StagedFutureExt[A](val f: Future[Future[A]]) extends AnyVal {
-		def staged(implicit ex: ExecutionContext): Future[Unit] = f.map((_:Future[A]) => ())
-		def onStage(fn:Function0[_])(implicit ex: ExecutionContext): Unit = f.onComplete((_:Try[Future[A]]) => ())
-		def resolved(implicit ex: ExecutionContext): Future[A] = f.flatMap(identity)
+	implicit class StagedFutureExt[T](val f: Future[T]) extends AnyVal {
+		def acceptMap[U](fn: Function[T,Future[U]])(implicit ec: ExecutionContext): StagedFuture[U] = {
+			StagedFuture(f.map(fn))
+		}
+
+		def stagedMap[U](fn: Function[T,StagedFuture[U]])(implicit ec: ExecutionContext): StagedFuture[U] = {
+			// TODO: can we do without the wrapping & unwrapping here?
+			StagedFuture(f.flatMap(x => fn(x).accepted))
+		}
 	}
 }

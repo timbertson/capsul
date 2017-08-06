@@ -69,7 +69,7 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 
 	def awaitMutateStaged[R](fn: Function[Ref[T],Future[R]])(implicit ec: ExecutionContext): Future[R] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnlyStaged(() => fn(state)))
-
+  //
 	def awaitTransform[R](fn: Function[T,T]): Future[Unit] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => state.set(fn(state.current))))
 
@@ -81,7 +81,7 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 
 	def awaitAccessStaged[R](fn: Function[T,Future[R]])(implicit ec: ExecutionContext): Future[R] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnlyStaged(() => fn(state.current)))
-
+  //
 	def current: Future[T] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => state.current))
 

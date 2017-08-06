@@ -5,9 +5,19 @@ import scala.concurrent._
 import scala.concurrent.duration._
 
 trait StagedFuture[T] extends Future[T] {
-	def accepted: Future[Unit]
+	/*
+	 * A staged future represents both asynchronous acceptance and asynchronous
+	 * fulfilment of a piece of work.
+	 *
+	 * It's conceptually just a Future[Future[T]], where the outer future is
+	 * resolved once the receiver has accepted the work, and the inner future
+	 * is resolved once the work is actually complete.
+	 *
+	 * By explicitly representing asynchronous acceptance, consumers can implement
+	 * backpressure without resorting to synchronous blocking.
+	 */
+	def accepted: Future[Future[T]]
 	def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit
-	def asNestedFuture: Future[Future[T]]
 }
 
 object StagedFuture {
@@ -16,9 +26,8 @@ object StagedFuture {
 	final def apply[A](future: Future[Future[A]]): StagedFuture[A] = new Wrapped(future)
 
 	private class Enqueued[T](f: Future[T]) extends StagedFuture[T] {
-		final def accepted: Future[Unit] = Future.successful(())
+		final def accepted: Future[Future[T]] = Future.successful(f)
 		final def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit = fn(f)
-		final def asNestedFuture: Future[Future[T]] = Future.successful(f)
 
 		// scala.concurrent.Awaitable
 		final def ready(atMost: Duration)(implicit permit: scala.concurrent.CanAwait): this.type = {
@@ -37,15 +46,13 @@ object StagedFuture {
 
 	private class Wrapped[T](f: Future[Future[T]]) extends StagedFuture[T] {
 		// StagedFuture extra interface
-		final def accepted: Future[Unit] = new DiscardingFuture(f)
+		final def accepted: Future[Future[T]] = f
 		final def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit = {
 			f.onComplete {
 				case Success(f) => fn(f)
 				case Failure(e) => fn(Future.failed(e)) // extremely uncommon
 			}
 		}
-
-		final def asNestedFuture: Future[Future[T]] = f
 
 		// scala.concurrent.Awaitable
 		def ready(atMost: Duration)(implicit permit: scala.concurrent.CanAwait): this.type = {

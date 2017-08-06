@@ -21,9 +21,18 @@ trait StagedFuture[T] extends Future[T] {
 }
 
 object StagedFuture {
-	final def successful[A](value: A): StagedFuture[A] = new Enqueued(Future.successful(value)) // could be more specialised, but used rarely
-	final def accepted[A](future: Future[A]): StagedFuture[A] = new Enqueued(future)
-	final def apply[A](future: Future[Future[A]]): StagedFuture[A] = new Wrapped(future)
+	def successful[A](value: A): StagedFuture[A] = new Enqueued(Future.successful(value)) // could be more specialised, but used rarely
+	def accepted[A](future: Future[A]): StagedFuture[A] = new Enqueued(future)
+	def apply[A](future: Future[Future[A]]): StagedFuture[A] = new Wrapped(future)
+	def apply[T](body: => T)(implicit ec: ExecutionContext): StagedFuture[T] = {
+		var accepted = Promise[Future[T]]()
+		Future {
+			val inner = Promise[T]()
+			accepted.success(inner.future)
+			inner.complete(Try(body))
+		}
+		new Wrapped(accepted.future)
+	}
 
 	private class Enqueued[T](f: Future[T]) extends StagedFuture[T] {
 		final def accepted: Future[Future[T]] = Future.successful(f)

@@ -37,13 +37,11 @@ object StateBased {
 			cache.get(resource) match {
 				case Some(cached) => cached
 				case None => {
-					// acceptMap maintains an outer future which represents work acceptance,
-					// and an inner future (the result) in order to maintain backpressure
-					val future = apiSemaphore.acquire.runAsync.acceptMap { case () => {
+					val future = StagedFuture(apiSemaphore.acquire.runAsync.map { case () => {
 						val result = Api.get(resource)
 						result.onComplete(_ => apiSemaphore.release.runAsync)
 						result
-					}}
+					}})
 					cache.update(resource, future)
 					future
 				}
@@ -77,11 +75,11 @@ object ActorBased {
 			case Request(resource:String) => cache.get(resource) match {
 				case Some(cached) => sender ! cached
 				case None => {
-					val future = apiSemaphore.acquire.runAsync.acceptMap(_ => {
+					val future = StagedFuture(apiSemaphore.acquire.runAsync.map(_ => {
 						val result = Api.get(resource)
 						result.onComplete(_ => apiSemaphore.release.runAsync)
 						result
-					})
+					}))
 					cache.update(resource, future)
 					sender ! future
 				}

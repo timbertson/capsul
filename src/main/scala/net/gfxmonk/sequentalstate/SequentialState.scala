@@ -49,6 +49,8 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	// set(value: T)
 	// access: Function[T,R] -> accepts a mutable Ref for both reading and setting.
 
+	// == send* ==
+	//
 	// sendMutate: omitted; sendTransform is just as functional
 	def sendTransform(fn: Function[T,T]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(fn(state.current))))
@@ -62,14 +64,14 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def sendAccessStaged[A](fn: Function[T,StagedFuture[A]])(implicit ec: ExecutionContext): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyStaged(() => fn(state.current)))
 
-	// == send* ==
+	// == await* ==
 
 	def awaitMutate[R](fn: Function[Ref[T],R]): Future[R] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => fn(state)))
 
-	def awaitMutateStaged[R](fn: Function[Ref[T],Future[R]])(implicit ec: ExecutionContext): Future[R] =
+	def awaitMutateStaged[R](fn: Function[Ref[T],StagedFuture[R]])(implicit ec: ExecutionContext): Future[R] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnlyStaged(() => fn(state)))
-  //
+
 	def awaitTransform[R](fn: Function[T,T]): Future[Unit] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => state.set(fn(state.current))))
 
@@ -79,13 +81,14 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def awaitAccess[R](fn: Function[T,R]): Future[R] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => fn(state.current)))
 
-	def awaitAccessStaged[R](fn: Function[T,Future[R]])(implicit ec: ExecutionContext): Future[R] =
+	def awaitAccessStaged[R](fn: Function[T,StagedFuture[R]])(implicit ec: ExecutionContext): Future[R] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnlyStaged(() => fn(state.current)))
-  //
+
 	def current: Future[T] =
 		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => state.current))
 
-	// raw*
+	// == raw* ==
+
 	def rawMutate[R](fn: Function[Ref[T],R]): StagedFuture[R] =
 		thread.enqueueRaw(UnitOfWork.Full(() => fn(state)))
 

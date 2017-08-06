@@ -27,7 +27,7 @@ object StateBased {
 			//
 			// The result is that if the final actor in the chain is at capacity,
 			// intermediate buffers will fill but not overflow, since they
-			// propagate the downstream state's acceptance.
+			// don't pop an item until it's accepted downstream
 			state.rawAccessStaged(prefix => {
 				val prefixed = prefix + value
 				next match {
@@ -46,7 +46,7 @@ object StateBased {
 				}
 
 				next match {
-					case Some(prefixer) => prefixed.stagedMap(prefixed => prefixer.prefixAsync(prefixed))
+					case Some(prefixer) => prefixed.flatMapStaged(prefixed => prefixer.prefixAsync(prefixed))
 					case None => StagedFuture.accepted(prefixed)
 				}
 			})

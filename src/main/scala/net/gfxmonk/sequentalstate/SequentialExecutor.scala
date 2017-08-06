@@ -1,6 +1,7 @@
 package net.gfxmonk.sequentialstate
 
 import java.util.concurrent.locks.LockSupport
+import scala.annotation.tailrec
 
 import monix.execution.atomic.Atomic
 
@@ -108,76 +109,93 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	val workLoop:Runnable = new Runnable() {
-		def run() {
-			// println("start")
-			var maxIterations = 200
-
+		def run(): Unit = {
 			val headNode = head.get
+			runNode(headNode, 200, headNode)
+		}
 
-			var node = headNode
-			while(maxIterations > 0) {
-				node.item.run()
-				maxIterations -= 1
+		private final def runNode(headNode: Node[EnqueueableTask], numIterations: Int, node: Node[EnqueueableTask]) = runNodeRec(headNode, numIterations, node)
 
-				var printlnNullifyTailAttempts = 0
-				while (node.next == null) {
-					printlnNullifyTailAttempts += 1
-					if(printlnNullifyTailAttempts>5) println("tail nullify attempts: " + printlnNullifyTailAttempts)
-					// looks like we've hit the tail.
-					if (tail.compareAndSet(node, null)) {
-						// yeah, that was the last item.
-
-						// Note: there's no need to reset either head or queued, as once tail is null
-						// the enqueuer will reset both of these before kicking off a new work loop.
-						// We do attempt to null out `head` because it could prevent GC of
-						// up to 200 tasks otherwise
-						head.compareAndSet(headNode, null)
-						// println("done " + (200 - maxIterations) + " tasks")
-						return
-					} else {
-						// println("spin() node.next")
-						// `node` isn't really the tail, so we just need to spin, waiting for
-						// its `.next` property to be set
-						// Thread.`yield`()
-						LockSupport.parkNanos(100)
-					}
-				}
-				node = node.next
-
-				// update queued
-				var updated = false
-				var printlnUpdatedCount = 0
-				while (!updated) {
-					printlnUpdatedCount += 1
-					if (printlnUpdatedCount > 5) println("runner queued update count: " + printlnUpdatedCount)
-					val currentQueued = queued.get
-					if (currentQueued.len == bufLen) {
-						// we're at capacity, only this thread can advance it (just use `set`)
-						val queuedNode = currentQueued.node
-						val nextQueued = queuedNode.next
-						if (nextQueued == null) {
-							queued.set(new Queued(bufLen-1, queuedNode))
-						} else {
-							queued.set(new Queued(bufLen, nextQueued))
-							// notify the lucky winner
-							nextQueued.item.enqueuedAsync()
+		@tailrec private final def runNodeRec(headNode: Node[EnqueueableTask], numIterations: Int, node: Node[EnqueueableTask]) {
+			if (numIterations > 0) {
+				val asyncCompletion = node.item.run()
+				asyncCompletion match {
+					case None => {
+						val next = completeNode(headNode, node)
+						if (next != null) {
+							runNodeRec(headNode, numIterations - 1, next)
 						}
-						updated = true
-					} else {
-						// We're not at capacity. If threads enqueue more tasks in the meantime
-						// this CAS will fail and we'll loop again
-						// println("queued = " + currentQueued)
-						updated = queued.compareAndSet(currentQueued, currentQueued)
 					}
+					case Some(f) => f.onAccept { _ =>
+						// TODO: we could keep this tail recursive if we check f.isAccepted
+						val next = completeNode(headNode, node)
+						if (next != null) {
+							runNode(headNode, numIterations - 1, next)
+						}
+					}
+				}
+			} else {
+				// we ran 200 iterations.
+				// update `head` and reenqueue this task so we don't hog this thread
+				if (!head.compareAndSet(headNode, node)) {
+					throw new IllegalStateException("head modified by external thread")
+				}
+				ec.execute(workLoop)
+			}
+		}
+
+		private final def completeNode(headNode: Node[EnqueueableTask], node: Node[EnqueueableTask]): Node[EnqueueableTask] = {
+			var printlnNullifyTailAttempts = 0
+			while (node.next == null) {
+				printlnNullifyTailAttempts += 1
+				if(printlnNullifyTailAttempts>5) println("tail nullify attempts: " + printlnNullifyTailAttempts)
+				// looks like we've hit the tail.
+				if (tail.compareAndSet(node, null)) {
+					// yeah, that was the last item.
+
+					// Note: there's no need to reset either head or queued, as once tail is null
+					// the enqueuer will reset both of these before kicking off a new work loop.
+					// We do attempt to null out `head` because it could prevent GC of
+					// up to 200 tasks otherwise
+					head.compareAndSet(headNode, null)
+					return null
+				} else {
+					// println("spin() node.next")
+					// `node` isn't really the tail, so we just need to spin, waiting for
+					// its `.next` property to be set
+					// Thread.`yield`()
+					LockSupport.parkNanos(100)
 				}
 			}
 
-			// we ran 200 iterations.
-			// update `head` and reenqueue this task so we don't hog this thread
-			if (!head.compareAndSet(headNode, node)) {
-				throw new IllegalStateException("head modified by external thread")
+			// update queued
+			var updated = false
+			var printlnUpdatedCount = 0
+			while (!updated) {
+				printlnUpdatedCount += 1
+				if (printlnUpdatedCount > 5) println("runner queued update count: " + printlnUpdatedCount)
+				val currentQueued = queued.get
+				if (currentQueued.len == bufLen) {
+					// we're at capacity, only this thread can advance it (just use `set`)
+					val queuedNode = currentQueued.node
+					val nextQueued = queuedNode.next
+					if (nextQueued == null) {
+						queued.set(new Queued(bufLen-1, queuedNode))
+					} else {
+						queued.set(new Queued(bufLen, nextQueued))
+						// notify the lucky winner
+						nextQueued.item.enqueuedAsync()
+					}
+					updated = true
+				} else {
+					// We're not at capacity. If threads enqueue more tasks in the meantime
+					// this CAS will fail and we'll loop again
+					// println("queued = " + currentQueued)
+					updated = queued.compareAndSet(currentQueued, currentQueued)
+				}
 			}
-			ec.execute(workLoop)
+
+			node.next
 		}
 	}
 

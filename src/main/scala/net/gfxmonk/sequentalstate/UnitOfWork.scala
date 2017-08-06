@@ -68,7 +68,7 @@ object UnitOfWork {
 		}
 	}
 
-	trait HasAsyncResult[A] { self: HasResultPromise[A] with HasExecutionContext =>
+	trait HasStagedResult[A] { self: HasResultPromise[A] with HasExecutionContext =>
 		final def reportSuccess(result: Future[A]): Unit = {
 			result.onComplete(resultPromise.complete)(ec)
 		}
@@ -90,27 +90,25 @@ object UnitOfWork {
 		}
 	}
 
-	case class FullAsync[A](fn: Function0[Future[Future[A]]])(implicit ec: ExecutionContext)
-		extends UnitOfWork[Future[Future[A]]]
+	case class FullStaged[A](fn: Function0[StagedFuture[A]])(implicit ec: ExecutionContext)
+		extends UnitOfWork[StagedFuture[A]]
 			with HasEnqueuePromise[Future[A]]
 			with HasResultPromise[A]
 	{
 		// ignore enqueues; we wait until the outer result future has been resolved
 		final def enqueuedAsync(): Unit = ()
 
-		final def reportSuccess(result: Future[Future[A]]): Unit = {
-			result.onComplete { result =>
+		final def reportSuccess(result: StagedFuture[A]): Unit = {
+			result.onAccept { future =>
 				enqueuedPromise.success(resultPromise.future)
-				result match {
-					case Success(f) => f.onComplete(resultPromise.complete)
-					case Failure(e) => resultPromise.failure(e)
-				}
+				future.onComplete(resultPromise.complete)
 			}
 		}
 
 		final def reportFailure(error: Throwable): Unit = {
 			// Make sure all failures happen as results, not enqueue errors
-			reportSuccess(Future.successful(Future.failed(error)))
+			// (unlikely, so we don't care if it's ineffieicnt)
+			reportSuccess(StagedFuture.accepted(Future.failed(error)))
 		}
 	}
 
@@ -124,15 +122,15 @@ object UnitOfWork {
 		}
 	}
 
-	case class EnqueueOnlyAsync[A](fn: Function0[Future[Future[A]]])(implicit ec: ExecutionContext)
-		extends UnitOfWork[Future[Future[A]]]
+	case class EnqueueOnlyStaged[A](fn: Function0[StagedFuture[A]])(implicit ec: ExecutionContext)
+		extends UnitOfWork[StagedFuture[A]]
 		with HasEnqueuePromise[Unit]
 	{
 		// ignore enqueues; we wait until the outer result future has been resolved
 		final def enqueuedAsync(): Unit = ()
 
-		final def reportSuccess(send: Future[Future[A]]): Unit = {
-			send.onComplete((result:Try[Future[A]]) => enqueuedPromise.success(()))
+		final def reportSuccess(send: StagedFuture[A]): Unit = {
+			send.onAccept((result:Future[A]) => enqueuedPromise.success(()))
 		}
 
 		final def reportFailure(error: Throwable): Unit = {
@@ -146,11 +144,11 @@ object UnitOfWork {
 		final def enqueuedAsync(): Unit = ()
 	}
 
-	case class ReturnOnlyAsync[A](fn: Function0[Future[A]])(implicit val ec: ExecutionContext)
+	case class ReturnOnlyStaged[A](fn: Function0[Future[A]])(implicit val ec: ExecutionContext)
 		extends UnitOfWork[Future[A]]
 		with HasResultPromise[A]
 		with HasExecutionContext
-		with HasAsyncResult[A]
+		with HasStagedResult[A]
 	{
 		final def enqueuedAsync(): Unit = ()
 	}

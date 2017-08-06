@@ -198,11 +198,11 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		task: EnqueueableTask
 			with UnitOfWork.HasEnqueuePromise[Future[R]]
 			with UnitOfWork.HasResultPromise[R]
-	): Future[Future[R]] = {
+	): StagedFuture[R] = {
 		if (enqueue(task)) {
-			Future.successful(task.resultPromise.future)
+			StagedFuture.accepted(task.resultPromise.future)
 		} else {
-			task.enqueuedPromise.future
+			StagedFuture(task.enqueuedPromise.future)
 		}
 	}
 }

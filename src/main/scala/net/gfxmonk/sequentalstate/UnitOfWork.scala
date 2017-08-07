@@ -70,28 +70,29 @@ object UnitOfWork {
 		}
 	}
 
+	trait HasEnqueueAndResultPromise[A] { self: HasEnqueuePromise[Future[A]] with HasResultPromise[A] =>
+		final def enqueuedAsync() {
+			enqueuedPromise.success(resultPromise.future)
+		}
+	}
+
 	case class Full[A](fn: Function0[A])
 		extends UnitOfWork[A]
 		with HasEnqueuePromise[Future[A]]
 		with HasResultPromise[A]
-    with HasSyncResult[A]
+		with HasSyncResult[A]
+		with HasEnqueueAndResultPromise[A]
 	{
-		final def enqueuedAsync() {
-			enqueuedPromise.success(resultPromise.future)
-		}
 	}
 
 	case class FullStaged[A](fn: Function0[StagedFuture[A]])(implicit ec: ExecutionContext)
 		extends UnitOfWork[StagedFuture[A]]
 			with HasEnqueuePromise[Future[A]]
 			with HasResultPromise[A]
+			with HasEnqueueAndResultPromise[A]
 	{
-		// ignore enqueues; we wait until the outer result future has been resolved
-		final def enqueuedAsync(): Unit = ()
-
 		final def reportSuccess(result: StagedFuture[A]): Option[StagedFuture[_]] = {
 			result.onAccept { future =>
-				enqueuedPromise.success(resultPromise.future)
 				future.onComplete(resultPromise.complete)
 			}
 			Some(result)
@@ -105,47 +106,52 @@ object UnitOfWork {
 		}
 	}
 
-	case class EnqueueOnly[A](fn: Function0[A])
-		extends UnitOfWork[A]
-		with HasEnqueuePromise[Unit]
-		with IgnoresResult[A]
-	{
+	trait IsEnqueueOnly { self: HasEnqueuePromise[Unit] =>
 		final def enqueuedAsync() {
 			enqueuedPromise.success(())
 		}
 	}
 
+	case class EnqueueOnly[A](fn: Function0[A])
+		extends UnitOfWork[A]
+		with HasEnqueuePromise[Unit]
+		with IsEnqueueOnly
+		with IgnoresResult[A]
+	{
+	}
+
 	case class EnqueueOnlyStaged[A](fn: Function0[StagedFuture[A]])(implicit ec: ExecutionContext)
 		extends UnitOfWork[StagedFuture[A]]
 		with HasEnqueuePromise[Unit]
+		with IsEnqueueOnly
 	{
-		// ignore enqueues; we wait until the outer result future has been resolved
-		final def enqueuedAsync(): Unit = ()
-
 		final def reportSuccess(send: StagedFuture[A]): Option[StagedFuture[_]] = {
-			send.onAccept((result:Future[A]) => enqueuedPromise.success(()))
 			Some(send)
 		}
 
 		final def reportFailure(error: Throwable): Option[StagedFuture[_]] = {
-			enqueuedPromise.success(())
 			None
 		}
 	}
 
-	case class ReturnOnly[A](fn: Function0[A])
-		extends UnitOfWork[A] with HasResultPromise[A] with HasSyncResult[A]
-	{
+	trait IgnoresEnqueue {
 		final def enqueuedAsync(): Unit = ()
+	}
+
+	case class ReturnOnly[A](fn: Function0[A])
+		extends UnitOfWork[A]
+		with HasResultPromise[A]
+		with HasSyncResult[A]
+		with IgnoresEnqueue
+	{
 	}
 
 	case class ReturnOnlyStaged[A](fn: Function0[StagedFuture[A]])(implicit val ec: ExecutionContext)
 		extends UnitOfWork[StagedFuture[A]]
 		with HasResultPromise[A]
 		with HasExecutionContext
+		with IgnoresEnqueue
 	{
-		final def enqueuedAsync(): Unit = ()
-
 		final def reportSuccess(result: StagedFuture[A]): Option[StagedFuture[_]] = {
 			result.onComplete(resultPromise.complete)(ec)
 			Some(result)

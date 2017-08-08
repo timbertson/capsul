@@ -55,7 +55,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 		if (currentTail == null) {
 			// we're the first item! runloop is definitely not running
-			queued.set(Queued.single(newTail))
+			queued.set(new Queued(workLoop.numInProgress + 1, newTail))
 			head.set(newTail)
 			ec.execute(workLoop)
 			true
@@ -108,35 +108,88 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	val workLoop:Runnable = new Runnable() {
+	trait WorkLoop extends Runnable {
+		def numInProgress: Int
+	}
+
+	val workLoop: WorkLoop = new WorkLoop() {
+		@volatile private var storedInProgress: List[Future[_]] = Nil
+
+		final def numInProgress = storedInProgress.length
+
 		def run(): Unit = {
 			val headNode = head.get
-			runNode(headNode, 200, headNode)
+			val inProgress = storedInProgress
+			storedInProgress = Nil
+			runNode(headNode, 200, headNode, inProgress)
 		}
 
-		private final def runNode(headNode: Node[EnqueueableTask], numIterations: Int, node: Node[EnqueueableTask]) = runNodeRec(headNode, numIterations, node)
+		private final def runNode(
+			headNode: Node[EnqueueableTask],
+			numIterations: Int,
+			node: Node[EnqueueableTask],
+			inProgress: List[Future[_]]) =
+		{
+			runNodeRec(headNode, numIterations, node, inProgress)
+		}
 
-		@tailrec private final def runNodeRec(headNode: Node[EnqueueableTask], numIterations: Int, node: Node[EnqueueableTask]) {
+		private def supendWithInProgress(
+			headNode: Node[EnqueueableTask],
+			completedNode: Node[EnqueueableTask],
+			inProgress: List[Future[_]]
+		): Unit = {
+			Future.firstCompletedOf[Any](inProgress).onComplete { _ =>
+				inProgress.partition(_.isCompleted) match {
+					case (Nil, inProgress) => assert(false)
+					case (completed, inProgress) => {
+						advanceQueued(completed.length)
+						val headNode = head.get
+						val nextNode = advanceNode(headNode, completedNode, inProgress)
+						if (nextNode != null) {
+							runNodeRec(headNode, 200, nextNode, inProgress)
+						}
+					}
+				}
+			}
+		}
+
+		@tailrec private final def runNodeRec(
+			headNode: Node[EnqueueableTask],
+			numIterations: Int,
+			node: Node[EnqueueableTask],
+			inProgress: List[Future[_]]
+		) {
 			if (numIterations > 0) {
 				val asyncCompletion = node.item.run()
 				asyncCompletion match {
 					case None => {
-						val next = completeNode(headNode, node)
+						val next = advanceNode(headNode, node, inProgress)
 						if (next != null) {
-							runNodeRec(headNode, numIterations - 1, next)
+							advanceQueued()
+							runNodeRec(headNode, numIterations - 1, next, inProgress)
 						}
 					}
-					case Some(f) => f.onAccept { _ =>
-						// TODO: we could keep this tail recursive if we check f.isAccepted
-						val next = completeNode(headNode, node)
-						if (next != null) {
-							runNode(headNode, numIterations - 1, next)
+					case Some(f) => {
+						// try completing some async inProgress items:
+						tryCompleteNodesAsync(f.accepted :: inProgress) match {
+							case None => {
+								// nothing ready
+								supendWithInProgress(headNode, node, inProgress)
+							}
+							case Some(inProgress) => {
+								// we can continue immediately with these remaining inProgress items
+								// (some were already done, or we're not at capacity)
+								val next = advanceNode(headNode, node, inProgress)
+								if (next != null) {
+									runNodeRec(headNode, numIterations - 1, next, inProgress)
+								}
+							}
 						}
 					}
 				}
 			} else {
-				// we ran 200 iterations.
-				// update `head` and reenqueue this task so we don't hog this thread
+				// we ran 200 iterations. Make sure we don't hog the thread
+				storedInProgress = inProgress
 				if (!head.compareAndSet(headNode, node)) {
 					throw new IllegalStateException("head modified by external thread")
 				}
@@ -144,20 +197,52 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			}
 		}
 
-		private final def completeNode(headNode: Node[EnqueueableTask], node: Node[EnqueueableTask]): Node[EnqueueableTask] = {
+		// returns
+		// None => cannot continue; at capacity
+		// Some(list) => new inProgress list (with complete items removed)
+		private final def tryCompleteNodesAsync(
+			inProgress: List[Future[_]]): Option[List[Future[_]]] =
+		{
+			while (true) {
+				val currentQueued = queued.get
+				if (currentQueued.len == bufLen) {
+					// we're at capacity, only this thread can advance it
+					return inProgress.partition(_.isCompleted) match {
+						// Are some of these items already done?
+						case (Nil, inProgress) => {
+							// nope
+							None
+						}
+						case (completed, inProgress) => {
+							advanceQueued(completed.length)
+							Some(inProgress)
+						}
+					}
+				} else {
+					// We're not at capacity. We can just leave inProgress items and
+					// accumulate some stuff.
+					if (queued.compareAndSet(currentQueued, currentQueued)) {
+						return Some(inProgress)
+					}
+				}
+			}
+			assert(false); None
+		}
+
+		private final def advanceNode(
+			headNode: Node[EnqueueableTask],
+			node: Node[EnqueueableTask],
+			inProgress: List[Future[_]]): Node[EnqueueableTask] =
+		{
 			var printlnNullifyTailAttempts = 0
 			while (node.next == null) {
 				printlnNullifyTailAttempts += 1
 				if(printlnNullifyTailAttempts>5) println("tail nullify attempts: " + printlnNullifyTailAttempts)
 				// looks like we've hit the tail.
+				storedInProgress = inProgress
 				if (tail.compareAndSet(node, null)) {
 					// yeah, that was the last item.
-
-					// Note: there's no need to reset either head or queued, as once tail is null
-					// the enqueuer will reset both of these before kicking off a new work loop.
-					// We do attempt to null out `head` because it could prevent GC of
-					// up to 200 tasks otherwise
-					head.compareAndSet(headNode, null)
+					head.compareAndSet(headNode, null) // best effort; helps with GC
 					return null
 				} else {
 					// println("spin() node.next")
@@ -167,11 +252,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					LockSupport.parkNanos(100)
 				}
 			}
+			node.next
+		}
 
-			// update queued
-			var updated = false
+		private final def advanceQueued(n: Int): Unit =
+		{
+			// n is always >0
 			var printlnUpdatedCount = 0
-			while (!updated) {
+			@tailrec def tryUpdate(numCompleted: Int): Unit = {
 				printlnUpdatedCount += 1
 				if (printlnUpdatedCount > 5) println("runner queued update count: " + printlnUpdatedCount)
 				val currentQueued = queued.get
@@ -180,23 +268,29 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					val queuedNode = currentQueued.node
 					val nextQueued = queuedNode.next
 					if (nextQueued == null) {
-						queued.set(new Queued(bufLen-1, queuedNode))
+						queued.set(new Queued(bufLen - numCompleted, queuedNode))
 					} else {
 						queued.set(new Queued(bufLen, nextQueued))
 						// notify the lucky winner
 						nextQueued.item.enqueuedAsync()
+						val completedRemaining = numCompleted - 1
+						if (completedRemaining > 0) {
+							tryUpdate(completedRemaining)
+						}
 					}
-					updated = true
 				} else {
 					// We're not at capacity. If threads enqueue more tasks in the meantime
 					// this CAS will fail and we'll loop again
 					// println("queued = " + currentQueued)
-					updated = queued.compareAndSet(currentQueued, currentQueued)
+					if (!queued.compareAndSet(currentQueued, currentQueued)) {
+						tryUpdate(numCompleted)
+					}
 				}
 			}
-
-			node.next
+			tryUpdate(n)
 		}
+
+		private def advanceQueued(): Unit = advanceQueued(1)
 	}
 
 	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {

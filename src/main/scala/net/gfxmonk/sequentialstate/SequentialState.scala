@@ -92,7 +92,7 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
 	def current: Future[T] =
-		thread.enqueueReturn(UnitOfWork.Full(() => state.current))
+		thread.enqueueRaw(UnitOfWork.Full(() => state.current))
 
 	def mutate[R](fn: Function[Ref[T],R]): StagedFuture[R] =
 		thread.enqueueRaw(UnitOfWork.Full(() => fn(state)))

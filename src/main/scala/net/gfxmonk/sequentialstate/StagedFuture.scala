@@ -17,15 +17,16 @@ trait StagedFuture[T] extends Future[T] {
 	 * backpressure without resorting to synchronous blocking.
 	 */
 	def accepted: Future[Future[T]]
+	def isAccepted: Boolean
 	def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit
 }
 
 object StagedFuture {
-	def successful[A](value: A): StagedFuture[A] = new Enqueued(Future.successful(value)) // could be more specialised, but used rarely
-	def accepted[A](future: Future[A]): StagedFuture[A] = new Enqueued(future)
+	def successful[A](value: A): StagedFuture[A] = new Accepted(Future.successful(value)) // could be more specialised, but used rarely
+	def accepted[A](future: Future[A]): StagedFuture[A] = new Accepted(future)
 	def apply[A](future: Future[Future[A]]): StagedFuture[A] = new Wrapped(future)
 	def apply[T](body: => T)(implicit ec: ExecutionContext): StagedFuture[T] = {
-		var accepted = Promise[Future[T]]()
+		val accepted = Promise[Future[T]]()
 		Future {
 			val inner = Promise[T]()
 			accepted.success(inner.future)
@@ -34,8 +35,9 @@ object StagedFuture {
 		new Wrapped(accepted.future)
 	}
 
-	private class Enqueued[T](f: Future[T]) extends StagedFuture[T] {
+	private class Accepted[T](f: Future[T]) extends StagedFuture[T] {
 		final def accepted: Future[Future[T]] = Future.successful(f)
+		final def isAccepted: Boolean = true
 		final def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit = fn(f)
 
 		// scala.concurrent.Awaitable
@@ -56,6 +58,7 @@ object StagedFuture {
 	private class Wrapped[T](f: Future[Future[T]]) extends StagedFuture[T] {
 		// StagedFuture extra interface
 		final def accepted: Future[Future[T]] = f
+		final def isAccepted: Boolean = f.isCompleted
 		final def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit = {
 			f.onComplete {
 				case Success(f) => fn(f)

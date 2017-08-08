@@ -301,11 +301,6 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	def enqueueReturn[R](task: EnqueueableTask with UnitOfWork.HasResultPromise[R]): Future[R] = {
-		enqueue(task)
-		task.resultPromise.future
-	}
-
 	def enqueueRaw[R](
 		task: EnqueueableTask
 			with UnitOfWork.HasEnqueuePromise[Future[R]]

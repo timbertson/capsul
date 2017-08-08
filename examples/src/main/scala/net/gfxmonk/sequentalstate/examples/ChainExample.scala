@@ -22,13 +22,13 @@ object StateBased {
 		def initPrefix(prefix: String): Future[Unit] = state.sendSet(prefix)
 
 		def prefix(value: String): StagedFuture[String] = {
-			// rawAccessStaged will delay acceptance until the outer
+			// accessStaged will delay acceptance until the outer
 			// future is complete. Which is the `enqueue` of the following actor.
 			//
 			// The result is that if the final actor in the chain is at capacity,
 			// intermediate buffers will fill but not overflow, since they
 			// don't pop an item until it's accepted downstream
-			state.rawAccessStaged(prefix => {
+			state.accessStaged(prefix => {
 				val prefixed = prefix + value
 				next match {
 					case Some(prefixer) => prefixer.prefix(prefixed)
@@ -38,7 +38,7 @@ object StateBased {
 		}
 
 		def prefixAsync(value: String): StagedFuture[String] = {
-			state.rawAccessStaged(prefix => {
+			state.accessStaged(prefix => {
 				val prefixed = Future {
 					//inexplicably async, for demonstration purposes
 					Thread.sleep(1000)

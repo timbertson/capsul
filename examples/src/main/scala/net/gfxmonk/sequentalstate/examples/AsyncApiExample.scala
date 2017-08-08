@@ -29,19 +29,14 @@ object Api {
 
 object StateBased {
 	class Cache() {
-		// Provides a cache in front of API requests, 5 of which
-		// actual requests are allowed at any point.
-		private val state = SequentialState(mutable.Map[String,StagedFuture[String]]())
-		private val apiSemaphore = TaskSemaphore(5)
-		def get(resource: String): StagedFuture[String] = state.rawAccessStaged(cache => {
+		// Provides a cache in front of API requests, up to 5 of
+		// which are allowed at any point.
+		private val state = SequentialState(mutable.Map[String,Future[String]](), 5)
+		def get(resource: String): StagedFuture[String] = state.accessAsync(cache => {
 			cache.get(resource) match {
 				case Some(cached) => cached
 				case None => {
-					val future = StagedFuture(apiSemaphore.acquire.runAsync.map { case () => {
-						val result = Api.get(resource)
-						result.onComplete(_ => apiSemaphore.release.runAsync)
-						result
-					}})
+					val future = Api.get(resource)
 					cache.update(resource, future)
 					future
 				}

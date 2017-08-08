@@ -41,7 +41,27 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val queued = Atomic(Queued.empty(nullNode))
 	private val tail = Atomic(nullNode)
 
-	private def enqueue(work: EnqueueableTask):Boolean = {
+	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
+		if (doEnqueue(task)) {
+			SequentialExecutor.successfulUnit
+		} else {
+			task.enqueuedPromise.future
+		}
+	}
+
+	def enqueue[R](
+		task: EnqueueableTask
+			with UnitOfWork.HasEnqueuePromise[Future[R]]
+			with UnitOfWork.HasResultPromise[R]
+	): StagedFuture[R] = {
+		if (doEnqueue(task)) {
+			StagedFuture.accepted(task.resultPromise.future)
+		} else {
+			StagedFuture(task.enqueuedPromise.future)
+		}
+	}
+
+	private def doEnqueue(work: EnqueueableTask):Boolean = {
 		var currentTail = tail.get
 		val newTail = new Node(work)
 
@@ -291,25 +311,5 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 
 		private def advanceQueued(): Unit = advanceQueued(1)
-	}
-
-	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
-		if (enqueue(task)) {
-			SequentialExecutor.successfulUnit
-		} else {
-			task.enqueuedPromise.future
-		}
-	}
-
-	def enqueueRaw[R](
-		task: EnqueueableTask
-			with UnitOfWork.HasEnqueuePromise[Future[R]]
-			with UnitOfWork.HasResultPromise[R]
-	): StagedFuture[R] = {
-		if (enqueue(task)) {
-			StagedFuture.accepted(task.resultPromise.future)
-		} else {
-			StagedFuture(task.enqueuedPromise.future)
-		}
 	}
 }

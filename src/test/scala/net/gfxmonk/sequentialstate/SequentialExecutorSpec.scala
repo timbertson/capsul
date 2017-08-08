@@ -73,13 +73,13 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 
 		it("delays job enqueue once capacity is reached") {
 			val ctx = Ctx.withManualExecution(3); import ctx._
-			val futures = List.fill(4)(ex.enqueueRaw(inc()))
+			val futures = List.fill(4)(ex.enqueue(inc()))
 			assert(futures.map(_.isAccepted) == List(true, true, true, false))
 		}
 
 		it("enqueues waiting jobs upon task completion") {
 			val ctx = Ctx.withManualExecution(3); import ctx._
-			val futures = List.fill(4)(ex.enqueueRaw(inc()))
+			val futures = List.fill(4)(ex.enqueue(inc()))
 
 			assert(futures.map(_.isAccepted) == List(true, true, true, false))
 
@@ -91,7 +91,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 
 		it("runs queued jobs in a single execution") {
 			val ctx = Ctx.withManualExecution(3); import ctx._
-			val futures = List.fill(3)(ex.enqueueRaw(inc()))
+			val futures = List.fill(3)(ex.enqueue(inc()))
 			assert(futures.map(_.isAccepted) == List(true, true, true))
 			assert(futures.map(_.isCompleted) == List(false, false, false))
 
@@ -107,7 +107,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 
 			// big sleep ensures that if we're not running in sequence,
 			// we'll encounter race conditions due to `inc()` not being thread-safe
-			awaitAll(List.fill(4)(ex.enqueueRaw(inc(sleep=50))))
+			awaitAll(List.fill(4)(ex.enqueue(inc(sleep=50))))
 
 			assert(queuedRunLoops.length == 1)
 			assert(count.current == 4)
@@ -116,7 +116,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 		it("executes up to 200 jobs in a single loop") {
 			val ctx = Ctx.withThreadPool(bufLen = 400); import ctx._
 
-			awaitAll(List.fill(200)(ex.enqueueRaw(inc(sleep=1))))
+			awaitAll(List.fill(200)(ex.enqueue(inc(sleep=1))))
 			assert(queuedRunLoops.length == 1)
 			assert(count.current == 200)
 		}
@@ -124,7 +124,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 		it("defers jobs into a new loop after 200 to prevent starvation") {
 			val ctx = Ctx.withThreadPool(bufLen = 400); import ctx._
 
-			awaitAll(List.fill(201)(ex.enqueueRaw(inc(sleep=1))))
+			awaitAll(List.fill(201)(ex.enqueue(inc(sleep=1))))
 			assert(queuedRunLoops.length == 2)
 			assert(count.current == 201)
 		}

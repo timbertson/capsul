@@ -92,23 +92,23 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
 	def current: Future[T] =
-		thread.enqueueRaw(UnitOfWork.Full(() => state.current))
+		thread.enqueue(UnitOfWork.Full(() => state.current))
 
 	def mutate[R](fn: Function[Ref[T],R]): StagedFuture[R] =
-		thread.enqueueRaw(UnitOfWork.Full(() => fn(state)))
+		thread.enqueue(UnitOfWork.Full(() => fn(state)))
 
 	def access[R](fn: Function[T,R]): StagedFuture[R] =
-		thread.enqueueRaw(UnitOfWork.Full(() => fn(state.current)))
+		thread.enqueue(UnitOfWork.Full(() => fn(state.current)))
 
 	def mutateStaged[R](fn: Function[Ref[T],StagedFuture[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueueRaw(new UnitOfWork.FullStaged[R](() => fn(state)))
+		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state)))
 
 	def mutateAsync[R](fn: Function[Ref[T],Future[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueueRaw(new UnitOfWork.FullAsync[R](() => fn(state)))
+		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state)))
 
 	def accessStaged[R](fn: Function[T,StagedFuture[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueueRaw(new UnitOfWork.FullStaged[R](() => fn(state.current)))
+		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state.current)))
 
 	def accessAsync[R](fn: Function[T,Future[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueueRaw(new UnitOfWork.FullAsync[R](() => fn(state.current)))
+		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
 }

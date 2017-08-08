@@ -5,9 +5,6 @@ import monix.execution.misc.NonFatal
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.{Try,Success,Failure}
 
-// TODO: there's a whole lotta mixins in here, they could probably be consolidated,
-// or sacrifice a few specialisations for less classes
-
 trait EnqueueableTask {
 	// Simplification for the scheduler, which doesn't
 	// care about the type parameter in UnitOfWork
@@ -155,43 +152,6 @@ object UnitOfWork {
 	{
 		final def reportSuccess(f: Future[A]): Option[Future[_]] = {
 			Some(f)
-		}
-	}
-
-
-	trait IgnoresEnqueue {
-		final def enqueuedAsync(): Unit = ()
-	}
-
-	case class ReturnOnly[A](fn: Function0[A])
-		extends UnitOfWork[A]
-		with HasResultPromise[A]
-		with HasSyncResult[A]
-		with IgnoresEnqueue
-	{
-	}
-
-	case class ReturnOnlyStaged[A](fn: Function0[StagedFuture[A]])(implicit protected val ec: ExecutionContext)
-		extends UnitOfWork[StagedFuture[A]]
-		with HasResultPromise[A]
-		with HasExecutionContext
-		with IgnoresEnqueue
-	{
-		final def reportSuccess(result: StagedFuture[A]): Option[Future[_]] = {
-			result.onComplete(resultPromise.complete)(ec)
-			Some(result.accepted)
-		}
-	}
-
-	case class ReturnOnlyAsync[A](fn: Function0[Future[A]])(implicit protected val ec: ExecutionContext)
-		extends UnitOfWork[Future[A]]
-		with HasResultPromise[A]
-		with HasExecutionContext
-		with IgnoresEnqueue
-	{
-		final def reportSuccess(result: Future[A]): Option[Future[_]] = {
-			result.onComplete(resultPromise.complete)(ec)
-			Some(result)
 		}
 	}
 }

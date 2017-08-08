@@ -30,21 +30,19 @@ object SequentialState {
 
 class SequentialState[T](init: T, thread: SequentialExecutor) {
 	private val state = new Ref(init)
-	// Methods are named <result><operation><mode>
+	// Methods are named <dispatch><operation><mode>
 	//
-	// Results:
+	// Dispatch:
 	//
 	//  - send:    Enqueue an action, returning Future[Unit]. Once the future is resolved, the
-	//             action has been accepted by the worker, but not yet performed.
+	//             action has been accepted by the worker, but not necessarily performed.
 	//
-	//  - await:   Perform an action and return its result. The future resolves once
-	//             the action is complete.
+	//  - (none):  Perform an action, returning a StagedFuture[T].
+	//             StagedFuture is a Future[T] with the additional ability to
+	//             determine when the item has been accepted, but not yet completed.
+	//             This can be used to manage backpressure.
 	//
-	//  - (empty): Perform an action, returning a Future[Future[T]]. The outer future
-	//             resolves once the task is enqueued (at which point futher tasks may
-	//             be enqueued). The inner future resolves once the task is completed.
-	//
-	// Actions:
+	// Operations:
 	//
 	//  - mutate:    accepts a function of type Ref[T] => R, returns R
 	//  - transform  accepts a function of type T => T, returns Unit
@@ -62,7 +60,7 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	//
 	// For asynchronous modes, subsequent tasks will still be run immediately
 	// after the function completes, but the task won't be considered done
-	// (for the purposes of enqueueing more tasks) until the future is resolved.
+	// (for the purposes of accepting more tasks) until the future is resolved.
 	//
 	// This means that you must be careful with `mutate` actions or with mutable
 	// state objects - you may mutate the state during the execution of the
@@ -78,9 +76,6 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	//             occupy a slot in this state's queue until the StagedFuture
 	//             is accepted.
 
-	// == send* ==
-	//
-	// sendMutate: omitted; sendTransform is just as functional
 	def sendTransform(fn: Function[T,T]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(fn(state.current))))
 
@@ -96,33 +91,8 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def sendAccessAsync[A](fn: Function[T,StagedFuture[A]]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
-	// == await* ==
-
-	def awaitMutate[R](fn: Function[Ref[T],R]): Future[R] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => fn(state)))
-
-	def awaitMutateStaged[R](fn: Function[Ref[T],StagedFuture[R]])(implicit ec: ExecutionContext): Future[R] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnlyStaged(() => fn(state)))
-
-	def awaitMutateAsync[R](fn: Function[Ref[T],Future[R]])(implicit ec: ExecutionContext): Future[R] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnlyAsync(() => fn(state)))
-
-	def awaitTransform[R](fn: Function[T,T]): Future[Unit] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => state.set(fn(state.current))))
-
-	def awaitAccess[R](fn: Function[T,R]): Future[R] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => fn(state.current)))
-
-	def awaitAccessStaged[R](fn: Function[T,StagedFuture[R]])(implicit ec: ExecutionContext): Future[R] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnlyStaged(() => fn(state.current)))
-
-	def awaitAccessAsync[R](fn: Function[T,StagedFuture[R]])(implicit ec: ExecutionContext): Future[R] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnlyAsync(() => fn(state.current)))
-
 	def current: Future[T] =
-		thread.enqueueReturn(UnitOfWork.ReturnOnly(() => state.current))
-
-	// == raw* ==
+		thread.enqueueReturn(UnitOfWork.Full(() => state.current))
 
 	def mutate[R](fn: Function[Ref[T],R]): StagedFuture[R] =
 		thread.enqueueRaw(UnitOfWork.Full(() => fn(state)))

@@ -157,7 +157,7 @@ class PipelineStage[T,R](
 						// we have some items to produce
 						val fut = handleCompleted(ret.toList)
 						state.outgoing = Some(fut)
-						fut.onComplete(_ => this.state.awaitAccess { state =>
+						fut.onComplete(_ => this.state.access { state =>
 							state.outgoing = None
 							// set up another drain when this outgoing batch is done
 							_drainCompleted(state)
@@ -172,7 +172,7 @@ class PipelineStage[T,R](
 	private def drainCompleted():Future[Unit] = state.sendAccess(_drainCompleted)
 
 	def enqueue(item: T):Future[Unit] = {
-		state.awaitAccess { state =>
+		state.access { state =>
 			_drainCompleted(state)
 
 			if (state.queue.size < bufLen) {
@@ -209,7 +209,7 @@ object Pipeline {
 			if (batch.exists(_.get.isEmpty)) {
 				// read the final state
 				transformSent.flatMap { case () =>
-					sink.awaitAccess { count =>
+					sink.access { count =>
 						drained.success(count)
 					}
 				}

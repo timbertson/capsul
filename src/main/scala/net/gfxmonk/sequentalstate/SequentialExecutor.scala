@@ -171,7 +171,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 					case Some(f) => {
 						// try completing some async inProgress items:
-						tryCompleteNodesAsync(f.accepted :: inProgress) match {
+						tryCompleteNodesAsync(f :: inProgress) match {
 							case None => {
 								// nothing ready
 								supendWithInProgress(headNode, node, inProgress)

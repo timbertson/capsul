@@ -5,21 +5,24 @@ import monix.execution.misc.NonFatal
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.{Try,Success,Failure}
 
+// TODO: there's a whole lotta mixins in here, they could probably be consolidated,
+// or sacrifice a few specialisations for less classes
+
 trait EnqueueableTask {
 	// Simplification for the scheduler, which doesn't
 	// care about the type parameter in UnitOfWork
 	def enqueuedAsync(): Unit
-	def run(): Option[StagedFuture[_]]
+	def run(): Option[Future[_]]
 }
 
 trait UnitOfWork[A] extends EnqueueableTask {
 	protected val fn: Function0[A]
 
 	def enqueuedAsync(): Unit
-	protected def reportSuccess(result: A): Option[StagedFuture[_]]
-	protected def reportFailure(error: Throwable): Option[StagedFuture[_]]
+	protected def reportSuccess(result: A): Option[Future[_]]
+	protected def reportFailure(error: Throwable): Option[Future[_]]
 
-	final def run(): Option[StagedFuture[_]] = {
+	final def run(): Option[Future[_]] = {
 		try {
 			reportSuccess(fn())
 		} catch {
@@ -40,8 +43,7 @@ object UnitOfWork {
 	}
 
 	trait IgnoresResult[A] {
-		final def reportSuccess(result: A): Option[StagedFuture[_]] = None
-		final def reportFailure(err: Throwable): Option[StagedFuture[_]] = None
+		final def reportSuccess(result: A): Option[Future[_]] = None
 	}
 
 	trait HasEnqueuePromise[A] {
@@ -56,16 +58,15 @@ object UnitOfWork {
 
 	trait HasResultPromise[A] {
 		val resultPromise: Promise[A] = Promise[A]()
+		final def reportFailure(error: Throwable): Option[Future[_]] = {
+			resultPromise.failure(error)
+			None
+		}
 	}
 
 	trait HasSyncResult[A] { self: HasResultPromise[A] =>
-		final def reportSuccess(result: A): Option[StagedFuture[_]] = {
+		final def reportSuccess(result: A): Option[Future[_]] = {
 			resultPromise.success(result)
-			None
-		}
-
-		final def reportFailure(error: Throwable): Option[StagedFuture[_]] = {
-			resultPromise.failure(error)
 			None
 		}
 	}
@@ -85,30 +86,47 @@ object UnitOfWork {
 	{
 	}
 
-	case class FullStaged[A](fn: Function0[StagedFuture[A]])(implicit ec: ExecutionContext)
+	trait HasStagedResult[A] { self: UnitOfWork[StagedFuture[A]] with HasExecutionContext with HasResultPromise[A] =>
+		final def reportSuccess(result: StagedFuture[A]): Option[Future[_]] = {
+			result.onComplete(resultPromise.complete)(ec)
+			Some(result.accepted)
+		}
+	}
+
+	trait HasFutureResult[A] { self: UnitOfWork[Future[A]] with HasExecutionContext with HasResultPromise[A] =>
+		final def reportSuccess(result: Future[A]): Option[Future[_]] = {
+			result.onComplete(resultPromise.complete)(ec)
+			Some(result)
+		}
+	}
+
+	case class FullStaged[A](fn: Function0[StagedFuture[A]])(implicit protected val ec: ExecutionContext)
 		extends UnitOfWork[StagedFuture[A]]
+			with HasExecutionContext
 			with HasEnqueuePromise[Future[A]]
 			with HasResultPromise[A]
 			with HasEnqueueAndResultPromise[A]
+			with HasStagedResult[A]
 	{
-		final def reportSuccess(result: StagedFuture[A]): Option[StagedFuture[_]] = {
-			result.onAccept { future =>
-				future.onComplete(resultPromise.complete)
-			}
-			Some(result)
-		}
+	}
 
-		final def reportFailure(error: Throwable): Option[StagedFuture[_]] = {
-			// Make sure all failures happen as results, not enqueue errors
-			// (unlikely, so we don't care if it's ineffieicnt)
-			reportSuccess(StagedFuture.accepted(Future.failed(error)))
-			None
-		}
+	case class FullAsync[A](fn: Function0[Future[A]])(implicit protected val ec: ExecutionContext)
+		extends UnitOfWork[Future[A]]
+			with HasExecutionContext
+			with HasEnqueuePromise[Future[A]]
+			with HasResultPromise[A]
+			with HasEnqueueAndResultPromise[A]
+			with HasFutureResult[A]
+	{
 	}
 
 	trait IsEnqueueOnly { self: HasEnqueuePromise[Unit] =>
 		final def enqueuedAsync() {
 			enqueuedPromise.success(())
+		}
+
+		final def reportFailure(error: Throwable): Option[Future[_]] = {
+			None
 		}
 	}
 
@@ -125,14 +143,21 @@ object UnitOfWork {
 		with HasEnqueuePromise[Unit]
 		with IsEnqueueOnly
 	{
-		final def reportSuccess(send: StagedFuture[A]): Option[StagedFuture[_]] = {
-			Some(send)
-		}
-
-		final def reportFailure(error: Throwable): Option[StagedFuture[_]] = {
-			None
+		final def reportSuccess(send: StagedFuture[A]): Option[Future[_]] = {
+			Some(send.accepted)
 		}
 	}
+
+	case class EnqueueOnlyAsync[A](fn: Function0[Future[A]])
+		extends UnitOfWork[Future[A]]
+		with HasEnqueuePromise[Unit]
+		with IsEnqueueOnly
+	{
+		final def reportSuccess(f: Future[A]): Option[Future[_]] = {
+			Some(f)
+		}
+	}
+
 
 	trait IgnoresEnqueue {
 		final def enqueuedAsync(): Unit = ()
@@ -146,21 +171,27 @@ object UnitOfWork {
 	{
 	}
 
-	case class ReturnOnlyStaged[A](fn: Function0[StagedFuture[A]])(implicit val ec: ExecutionContext)
+	case class ReturnOnlyStaged[A](fn: Function0[StagedFuture[A]])(implicit protected val ec: ExecutionContext)
 		extends UnitOfWork[StagedFuture[A]]
 		with HasResultPromise[A]
 		with HasExecutionContext
 		with IgnoresEnqueue
 	{
-		final def reportSuccess(result: StagedFuture[A]): Option[StagedFuture[_]] = {
+		final def reportSuccess(result: StagedFuture[A]): Option[Future[_]] = {
+			result.onComplete(resultPromise.complete)(ec)
+			Some(result.accepted)
+		}
+	}
+
+	case class ReturnOnlyAsync[A](fn: Function0[Future[A]])(implicit protected val ec: ExecutionContext)
+		extends UnitOfWork[Future[A]]
+		with HasResultPromise[A]
+		with HasExecutionContext
+		with IgnoresEnqueue
+	{
+		final def reportSuccess(result: Future[A]): Option[Future[_]] = {
 			result.onComplete(resultPromise.complete)(ec)
 			Some(result)
-		}
-
-		final def reportFailure(error: Throwable): Option[StagedFuture[_]] = {
-			// Make sure all failures happen as results, not enqueue
-			resultPromise.failure(error)
-			None
 		}
 	}
 }

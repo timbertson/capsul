@@ -8,7 +8,7 @@ import scala.collection.immutable.Queue
 trait InspectableExecutionContext extends ExecutionContext {
 	def queue: Queue[Runnable]
 	def runOne(): Unit
-	def runAll(): Unit
+	def runUntilEmpty(): Unit
 }
 
 class ManualExecutionContext extends InspectableExecutionContext {
@@ -25,10 +25,11 @@ class ManualExecutionContext extends InspectableExecutionContext {
 
 	override def reportFailure(cause: Throwable) = throw cause
 
-	override def runAll(): Unit = {
+	override def runUntilEmpty(): Unit = {
 		val tasks = queue
 		queue = Queue.empty
 		tasks.foreach(_.run())
+		if (queue.nonEmpty) runUntilEmpty()
 	}
 }
 
@@ -37,7 +38,7 @@ class CountingExecutionContext(ec: ExecutionContext) extends InspectableExecutio
 	var queue = Queue.empty[Runnable]
 
 	override def runOne(): Unit = ???
-	override def runAll(): Unit = ???
+	override def runUntilEmpty(): Unit = ???
 
 	override def execute(runnable: Runnable) = {
 		queue = queue.enqueue(runnable)

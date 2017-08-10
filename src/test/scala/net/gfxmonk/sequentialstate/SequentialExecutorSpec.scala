@@ -10,6 +10,19 @@ import scala.collection.immutable.Queue
 import scala.collection.mutable
 
 object SequentialExecutorSpec {
+	def group[A](items: List[A]): List[(A, Int)] = {
+		def fold(items: List[A]): List[(A, Int)] = {
+			items match {
+				case Nil => Nil
+				case head::tail => {
+					val (additional, rest) = tail.span(_ == head)
+					(head -> (1 + additional.length)) :: fold(rest)
+				}
+			}
+		}
+		fold(items.reverse).reverse
+	}
+
 	class Ctx(bufLen: Int, val ec: InspectableExecutionContext) {
 		implicit val executionContext: ExecutionContext = ec
 		var count = new Ctx.Count
@@ -30,7 +43,7 @@ object SequentialExecutorSpec {
 			Thread.sleep(sleep)
 			assert(count.busy == true)
 			count.current = initial + 1
-			println(s"incremented count from $initial to ${count.current}")
+			// println(s"incremented count from $initial to ${count.current}")
 			count.busy = false
 			count.current
 		}
@@ -193,34 +206,34 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 			)
 			ec.runOne()
 			futures ++= List.fill(2)(ex.enqueue(incAsync()))
-			ec.runOne()
-			assert(futures.map(_.isAccepted) == List(true, true, true, false))
+			ec.runUntilEmpty()
+			assert(group(futures.map(_.isAccepted)) == List(true -> 3, false -> 1))
 		}
 
 		it("resumes execution after being blocked on async tasks") {
 			val ctx = Ctx.withManualExecution(3); import ctx._
 			val futures = List.fill(6)(ex.enqueue(incAsync()))
-			assert(futures.take(4).map(_.isAccepted) == List(true, true, true, false))
+			assert(group(futures.take(4).map(_.isAccepted)) == List(true -> 3, false -> 1))
 			ec.runOne()
-			// ex still blocked because it has three outsttanding futures
-			assert(futures.take(4).map(_.isAccepted) == List(true, true, true, false))
+			// ex still blocked because it has three outstanding futures
+			assert(group(futures.take(4).map(_.isAccepted)) == List(true -> 3, false -> 1))
 
 			promises.take(2).foreach(_.success(()))
-			ec.runOne()
+			ec.runUntilEmpty()
 
 			// on completion of (n) items, it should accept (n) new items
-			assert(futures.map(_.isAccepted) == List(true, true, true, true, true, false))
+			assert(group(futures.map(_.isAccepted)) == List(true -> 5, false -> 1))
 		}
 
-		it("removes complete async promises when sync ones complete") {
+		it("prunes complete async tasks after a sync task") {
 			val ctx = Ctx.withManualExecution(2); import ctx._
 			val futures = List(
 				ex.enqueue(noopAsync()),
 				ex.enqueue(UnitOfWork.Full(() => promises.head.success(())))
-			) ++ List.fill(3)(ex.enqueue(inc()))
-			assert(futures.map(_.isAccepted) == List(true, true, false, false, false))
-			ec.runOne()
-			assert(futures.map(_.isAccepted) == List(true, true, true, true, false))
+			) ++ List.fill(3)(ex.enqueue(incAsync()))
+			assert(group(futures.map(_.isAccepted)) == List(true -> 2, false -> 3))
+			ec.runUntilEmpty()
+			assert(group(futures.map(_.isAccepted)) == List(true -> 4, false -> 1))
 		}
 	}
 }

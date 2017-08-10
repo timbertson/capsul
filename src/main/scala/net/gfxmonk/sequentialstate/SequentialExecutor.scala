@@ -183,17 +183,24 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				val asyncCompletion = node.item.run()
 				asyncCompletion match {
 					case None => {
-						val next = advanceNode(headNode, node, inProgress)
-						if (next != null) {
-							advanceQueued()
-							runNodeRec(headNode, numIterations - 1, next, inProgress)
+						completeNodes(1, node, inProgress) match {
+							case None => assert(false) // we can always advance 1 node
+							case Some(inProgress) => {
+								val next = advanceNode(headNode, node, inProgress)
+								if (next == null) {
+									// done executing, save inProgress for next loop
+									storedInProgress = inProgress
+								} else {
+									runNodeRec(headNode, numIterations - 1, next, inProgress)
+								}
+							}
 						}
 					}
 					case Some(f) => {
 						// try completing some async inProgress items:
-						tryCompleteNodesAsync(f :: inProgress) match {
+						completeNodes(0, node, f :: inProgress) match {
 							case None => {
-								// nothing ready
+								// nothing to dequeue
 								supendWithInProgress(headNode, node, inProgress)
 							}
 							case Some(inProgress) => {
@@ -220,33 +227,48 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		// returns
 		// None => cannot continue; at capacity
 		// Some(list) => new inProgress list (with complete items removed)
-		private final def tryCompleteNodesAsync(
+		private final def completeNodes(
+			completedSync: Int,
+			completed: Node[EnqueueableTask],
 			inProgress: List[Future[_]]): Option[List[Future[_]]] =
 		{
-			while (true) {
+			@tailrec def tryUpdate():Option[List[Future[_]]] = {
 				val currentQueued = queued.get
-				if (currentQueued.len == bufLen) {
-					// we're at capacity, only this thread can advance it
-					return inProgress.partition(_.isCompleted) match {
-						// Are some of these items already done?
-						case (Nil, inProgress) => {
-							// nope
-							None
-						}
-						case (completed, inProgress) => {
-							advanceQueued(completed.length)
+				inProgress.partition(_.isCompleted) match {
+					// Are some of these items already done?
+					case (Nil, inProgress) => {
+						// Nothing async has completed yet
+						if (completedSync != 0) {
+							// but we can advance a sync item
+							advanceQueued(completedSync)
 							Some(inProgress)
+						} else {
+							if (currentQueued.len == bufLen) {
+								// We're at capacity. Did we just complete the final queued item?
+								if (currentQueued.node.eq(completed)) {
+									// Yes, we're blocked
+									None
+								} else {
+									// No, there are more queued items to execute
+									Some(inProgress)
+								}
+							} else {
+								// Nothing has completed, but we're not at capacity.
+								if (queued.compareAndSet(currentQueued, currentQueued)) {
+									Some(inProgress)
+								} else {
+									tryUpdate()
+								}
+							}
 						}
 					}
-				} else {
-					// We're not at capacity. We can just leave inProgress items and
-					// accumulate some stuff.
-					if (queued.compareAndSet(currentQueued, currentQueued)) {
-						return Some(inProgress)
+					case (completed, inProgress) => {
+						advanceQueued(completed.length + completedSync)
+						Some(inProgress)
 					}
 				}
 			}
-			assert(false); None
+			tryUpdate()
 		}
 
 		private final def advanceNode(
@@ -309,7 +331,5 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			}
 			tryUpdate(n)
 		}
-
-		private def advanceQueued(): Unit = advanceQueued(1)
 	}
 }

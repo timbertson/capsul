@@ -176,13 +176,25 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 			assert(count.current == 2)
 		}
 
-		it("maintains unfinished tasks across workloop invocations") {
+		it("maintains unfinished tasks after workloop ends on an async task") {
 			val ctx = Ctx.withManualExecution(2); import ctx._
 			var futures = List.fill(1)(ex.enqueue(incAsync()))
 			ec.runOne()
 			futures ++= List.fill(2)(ex.enqueue(incAsync()))
 			ec.runOne()
 			assert(futures.map(_.isAccepted) == List(true, true, false))
+		}
+
+		it("maintains unfinished tasks after workloop ends on a sync task") {
+			val ctx = Ctx.withManualExecution(2); import ctx._
+			var futures = List(
+				ex.enqueue(incAsync()),
+				ex.enqueue(inc())
+			)
+			ec.runOne()
+			futures ++= List.fill(2)(ex.enqueue(incAsync()))
+			ec.runOne()
+			assert(futures.map(_.isAccepted) == List(true, true, true, false))
 		}
 
 		it("resumes execution after being blocked on async tasks") {

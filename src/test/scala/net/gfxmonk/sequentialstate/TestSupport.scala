@@ -7,16 +7,15 @@ import scala.collection.immutable.Queue
 
 trait InspectableExecutionContext extends ExecutionContext {
 	def queue: Queue[Runnable]
-	def runOne(): Unit = {
-		queue.head.run()
-	}
+	def runOne(): Unit
+	def runAll(): Unit
 }
 
 class ManualExecutionContext extends InspectableExecutionContext {
 	var queue = Queue.empty[Runnable]
 
 	override def runOne(): Unit = {
-		super.runOne()
+		queue.head.run()
 		queue = queue.tail
 	}
 
@@ -25,15 +24,20 @@ class ManualExecutionContext extends InspectableExecutionContext {
 	}
 
 	override def reportFailure(cause: Throwable) = throw cause
+
+	override def runAll(): Unit = {
+		val tasks = queue
+		queue = Queue.empty
+		tasks.foreach(_.run())
+	}
 }
 
 class CountingExecutionContext(ec: ExecutionContext) extends InspectableExecutionContext {
 	def count = queue.length
 	var queue = Queue.empty[Runnable]
 
-	override def runOne(): Unit = {
-		throw new RuntimeException("Don't runOne on a CountingExecutionContext")
-	}
+	override def runOne(): Unit = ???
+	override def runAll(): Unit = ???
 
 	override def execute(runnable: Runnable) = {
 		queue = queue.enqueue(runnable)

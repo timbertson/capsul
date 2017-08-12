@@ -93,9 +93,9 @@ object CounterActor {
 
 class CounterState()(implicit ec: ExecutionContext) {
 	private val state = SequentialState(0)
-	def inc() = state.sendTransform{
-		// Thread.sleep(1)
-		_+1
+	def inc() = state.sendTransform { current =>
+		// Log(s"incrementing $current -> ${current+1}")
+		current+1
 	}
 	def dec() = state.sendTransform(_-1)
 	def current = state.current
@@ -114,11 +114,41 @@ object CounterState {
 
 	def runWithBackpressure(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
 		val counter = new CounterState()
+		// val stop = Promise[Unit]()
+		// @volatile var th:Option[Thread] = None
+		// val timeout = Future {
+		// 	th = Some(Thread.currentThread())
+		// 	try {
+		// 		Thread.sleep(5000)
+		// 		th = None
+		// 	} catch {
+		// 		case e:InterruptedException => ()
+		// 		th = None
+		// 	}
+		// }
+    //
+		// Future.firstCompletedOf(Seq(stop.future, timeout)).onComplete { _ =>
+		// 	if(timeout.isCompleted) {
+		// 		Log("*** timeout triggered")
+		// 	}
+		// 	th.foreach(_.interrupt())
+		// }
+
 		def loop(i:Int): Future[Int] = {
+			// val log = Log.id(s"runWithBackpressure($i)")
+			val start = System.currentTimeMillis()
 			if (i == 0) {
+				// log("EOF")
+				// stop.success(())
 				counter.current
 			} else {
-				counter.inc().flatMap { case () => loop(i-1) }
+				val p = counter.inc()
+				// log(s"inc: $i")
+				p.flatMap { case () => {
+					val time = System.currentTimeMillis() - start
+					// log(s"complete: $i @ $time")
+					loop(i-1)
+				}}
 			}
 		}
 		loop(n)
@@ -394,18 +424,17 @@ object PerfExample {
 
 	def time(impl: () => Future[_]):(Int,_) = {
 		val start = System.currentTimeMillis()
-		// println("Start")
 		val f = impl
-		// println("(computed)")
 		val result = Try {
-			Await.result(f(), Duration(8, TimeUnit.SECONDS))
+			Await.result(f(), Duration(6, TimeUnit.SECONDS))
+			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {
+			Log.dump(400)
 			println(result)
 		}
 		val end = System.currentTimeMillis()
 		val duration = end - start
-		// println("Done")
 		(duration.toInt, result)
 	}
 
@@ -415,8 +444,10 @@ object PerfExample {
 			val times = new mutable.Queue[Int]()
 			val results = mutable.Set[Any]()
 			while(attempt>0) {
-//				 println(s"$name: begin attempt $attempt")
+				Log.clear()
+				Log(s"$name: begin attempt $attempt")
 				val (cost,result) = time(fn)
+				Log(s"$name: end attempt $attempt")
 				results.add(result)
 				if (attempt <= n) {
 					times.enqueue(cost)
@@ -435,6 +466,7 @@ object PerfExample {
 	}
 
 	def run(): Unit = {
+		Log.enable()
 		val repeat = this.repeat(20) _
 		val bufLen = 10
 

@@ -64,16 +64,19 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private def doEnqueue(work: EnqueueableTask):Boolean = {
 		var currentTail = tail.get
 		val newTail = new Node(work)
+		// val log = Log.id(s"doEnqueue(${System.identityHashCode(newTail)})")
 
 		// may race with other enqueuer threads
-		var printlnTailCount = 1
+		// var logTailCount = 1
 		while(!tail.compareAndSet(currentTail, newTail)) {
-			printlnTailCount += 1
-			if(printlnTailCount > 5) println("printlnTailCount: " + printlnTailCount)
+			// logTailCount += 1
+			// if(logTailCount > 5) log("logTailCount: " + logTailCount)
 			currentTail = tail.get
 		}
+		// log("added to tail")
 
 		if (currentTail == null) {
+			// log(s"currentTail == null; beginning loop with ${workLoop.numInProgress} in progress items")
 			// we're the first item! runloop is definitely not running
 			queued.set(new Queued(workLoop.numInProgress + 1, newTail))
 			head.set(newTail)
@@ -83,33 +86,33 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// nodes must be present in the linked list before adding them to `queued`
 			// (also we want the consumer to see new tasks ASAP)
 			currentTail.next = newTail
+			// log(s"set currentTail.next")
 
 			// now update `queued`
-			var printlnQueueCount = 0
+			// var logQueueCount = 0
 			while(true) {
-				printlnQueueCount += 1
-				if(printlnQueueCount > 5) println("..ongoing queue attempts: " + printlnQueueCount)
+				// logQueueCount += 1
+				// if(logQueueCount > 5) log("..ongoing queue attempts: " + logQueueCount)
 				val currentQueued = queued.get
 				if (currentQueued.len == bufLen) {
-					// we're at capacity - only the consumer can advance queued
-					// (and it already knows about our new node because we've put it in tail)
+					// log("at capacity; not advancing queued")
 					return false
 				} else {
 					if (currentQueued.node.eq(currentTail)) {
 						// common case: we added a node, and now we can (try to) enqueue it
 						if (queued.compareAndSet(currentQueued, currentQueued.add(newTail))) {
-							// println("queued is now " + (currentQueued.len+1))
-							// if(printlnTailCount > 1 || printlnQueueCount > 1) println("tail attempts: " + printlnTailCount + ", queued attempts = " + printlnQueueCount)
+							// log(s"below capacity (${currentQueued.len} < ${bufLen}, advanced node by one")
 							return true
-						} // else try again
+						}
 					} else if (currentQueued.node.eq(newTail)) {
-						// someone has already enqueued us
+						// log("below capacity, but new node is already enqueued")
 						return true
 					} else {
 						if (newTail.appearsAfter(currentQueued.node)) {
 							// We need `queued` to advance until either we reach buflen or the
 							// task we added, and any thread knows enough to do that. Give it a go,
 							// but don't retry if someone beats us to it.
+							// log("below capacity; attempting to advance queued by one")
 							val _:Boolean = queued.compareAndSet(currentQueued, currentQueued.add(currentQueued.node.next))
 						} else {
 							// OR, there are two possibilities:
@@ -117,7 +120,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 							//  - the entire stack that we were added to has been completed,
 							//    and queued is now a new stack
 							// Either way, we were certainly enqueued.
-							// println("enqueue(): queued advanced past us; skipping")
+							// log("below capacity; but I don't see myself in the node chain")
 							return true
 						}
 					}
@@ -137,31 +140,25 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 		final def numInProgress = storedInProgress.length
 
-		def run(): Unit = {
+		final def run(): Unit = {
+			// Log.id("WorkLoop.run")("begin")
 			val headNode = head.get
 			val inProgress = storedInProgress
-			storedInProgress = Nil
-			runNode(headNode, 200, headNode, inProgress)
+			runNodeRec(headNode, 200, headNode, inProgress)
 		}
 
-		private final def runNode(
-			headNode: Node[EnqueueableTask],
-			numIterations: Int,
-			node: Node[EnqueueableTask],
-			inProgress: List[Future[_]]) =
-		{
-			runNodeRec(headNode, numIterations, node, inProgress)
-		}
-
-		private def supendWithInProgress(
+		private def suspendWithInProgress(
 			headNode: Node[EnqueueableTask],
 			completedNode: Node[EnqueueableTask],
 			inProgress: List[Future[_]]
 		): Unit = {
+			// val log = Log.id("suspendWithInProgress")
+			// log(s"suspending with ${inProgress.length}")
 			Future.firstCompletedOf[Any](inProgress).onComplete { _ =>
 				inProgress.partition(_.isCompleted) match {
 					case (Nil, inProgress) => assert(false)
 					case (completed, inProgress) => {
+						// log(s"${completed.length} of ${inProgress.length} completed!")
 						advanceQueued(completed.length)
 						val headNode = head.get
 						val nextNode = advanceNode(headNode, completedNode, inProgress)
@@ -179,33 +176,31 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			node: Node[EnqueueableTask],
 			inProgress: List[Future[_]]
 		) {
+			// val log = Log.id("runNodeRec")
 			if (numIterations > 0) {
 				val asyncCompletion = node.item.run()
 				asyncCompletion match {
 					case None => {
+						// log("ran sync node")
 						completeNodes(1, node, inProgress) match {
 							case None => assert(false) // we can always advance 1 node
 							case Some(inProgress) => {
 								val next = advanceNode(headNode, node, inProgress)
-								if (next == null) {
-									// done executing, save inProgress for next loop
-									storedInProgress = inProgress
-								} else {
+								if (next != null) {
 									runNodeRec(headNode, numIterations - 1, next, inProgress)
 								}
 							}
 						}
 					}
 					case Some(f) => {
-						// try completing some async inProgress items:
+						// log("ran async node")
 						completeNodes(0, node, f :: inProgress) match {
 							case None => {
-								// nothing to dequeue
-								supendWithInProgress(headNode, node, inProgress)
+								// log("nothing to dequeue; suspending")
+								suspendWithInProgress(headNode, node, inProgress)
 							}
 							case Some(inProgress) => {
-								// we can continue immediately with these remaining inProgress items
-								// (some were already done, or we're not at capacity)
+								// log("there are tasks ready to execute")
 								val next = advanceNode(headNode, node, inProgress)
 								if (next != null) {
 									runNodeRec(headNode, numIterations - 1, next, inProgress)
@@ -215,7 +210,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 				}
 			} else {
-				// we ran 200 iterations. Make sure we don't hog the thread
+				// log("ran 200 iterations; trampolining")
 				storedInProgress = inProgress
 				if (!head.compareAndSet(headNode, node)) {
 					throw new IllegalStateException("head modified by external thread")
@@ -232,6 +227,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			completed: Node[EnqueueableTask],
 			inProgress: List[Future[_]]): Option[List[Future[_]]] =
 		{
+			// val log = Log.id(if (completedSync == 0) "completeNodesAsync" else "completeNotesSync")
 			@tailrec def tryUpdate():Option[List[Future[_]]] = {
 				val currentQueued = queued.get
 				inProgress.partition(_.isCompleted) match {
@@ -239,22 +235,25 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					case (Nil, inProgress) => {
 						// Nothing async has completed yet
 						if (completedSync != 0) {
-							// but we can advance a sync item
+							// log(s"advancing $completedSync sync item")
 							advanceQueued(completedSync)
 							Some(inProgress)
 						} else {
+							// log("nothing async completed")
 							if (currentQueued.len == bufLen) {
+								// log("we're at capacity (so nobody else will update queued)")
+								// log("did we just run the final queued item?")
 								// We're at capacity. Did we just complete the final queued item?
 								if (currentQueued.node.eq(completed)) {
-									// Yes, we're blocked
+									// log("yes; returning None")
 									None
 								} else {
-									// No, there are more queued items to execute
+									// log("no, we have queued items. Returning unchanged inProgress")
 									Some(inProgress)
 								}
 							} else {
-								// Nothing has completed, but we're not at capacity.
 								if (queued.compareAndSet(currentQueued, currentQueued)) {
+									// log("...but we have space left in the queue")
 									Some(inProgress)
 								} else {
 									tryUpdate()
@@ -263,6 +262,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 						}
 					}
 					case (completed, inProgress) => {
+						// log("we have some completed async items")
 						advanceQueued(completed.length + completedSync)
 						Some(inProgress)
 					}
@@ -276,54 +276,80 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			node: Node[EnqueueableTask],
 			inProgress: List[Future[_]]): Node[EnqueueableTask] =
 		{
-			var printlnNullifyTailAttempts = 0
+			// val log = Log.id("advanceNode")
+			// var logNullifyTailAttempts = 0
 			while (node.next == null) {
-				printlnNullifyTailAttempts += 1
-				if(printlnNullifyTailAttempts>5) println("tail nullify attempts: " + printlnNullifyTailAttempts)
-				// looks like we've hit the tail.
+				// logNullifyTailAttempts += 1
+				// if(logNullifyTailAttempts>5) log("tail nullify attempts: " + logNullifyTailAttempts)
+	
+				// looks like we've hit the tail. We need to save storedInProgress eagerly,
+				// as the next run could potentially occur the moment we set `headNode`
+				// to null
 				storedInProgress = inProgress
 				if (tail.compareAndSet(node, null)) {
-					// yeah, that was the last item.
+					// log(s"completed last item (${System.identityHashCode(node)}); storedInProgress has ${inProgress.length}")
 					head.compareAndSet(headNode, null) // best effort; helps with GC
 					return null
 				} else {
-					// println("spin() node.next")
 					// `node` isn't really the tail, so we just need to spin, waiting for
 					// its `.next` property to be set
-					// Thread.`yield`()
 					LockSupport.parkNanos(100)
 				}
 			}
+			// log(s"advanced")
 			node.next
 		}
 
 		private final def advanceQueued(n: Int): Unit =
 		{
 			// n is always >0
-			var printlnUpdatedCount = 0
+			// val log = Log.id(s"advanceQueued($n)")
+			// var logUpdatedCount = 0
 			@tailrec def tryUpdate(numCompleted: Int): Unit = {
-				printlnUpdatedCount += 1
-				if (printlnUpdatedCount > 5) println("runner queued update count: " + printlnUpdatedCount)
+				// logUpdatedCount += 1
+				// if (logUpdatedCount > 5) log("runner queued update count: " + logUpdatedCount)
 				val currentQueued = queued.get
 				if (currentQueued.len == bufLen) {
 					// we're at capacity, only this thread can advance it (just use `set`)
 					val queuedNode = currentQueued.node
+					// log(s"at capacity (queued = ${System.identityHashCode(queuedNode)}")
+
 					val nextQueued = queuedNode.next
 					if (nextQueued == null) {
-						queued.set(new Queued(bufLen - numCompleted, queuedNode))
+						// log(s"no next; decrementing count to ${bufLen - numCompleted}")
+						val newQueued = new Queued(bufLen - numCompleted, queuedNode)
+						queued.update(newQueued)
+						val updatedNext = queuedNode.next
+						if (updatedNext != null) {
+							// race: we thought there was no next item, but it's been made
+							// non-null since we checked. We now have a `.next` node which
+							// is marked as not enqueued, but we have capacity for it.
+	
+							// log("queuedNode.next was just modified, it may not have seen the free capacity")
+							if (queued.compareAndSet(newQueued, newQueued.add(updatedNext))) {
+								// log(" - it is now enqueued")
+								updatedNext.item.enqueuedAsync()
+							} else {
+								// the above condition is self-righting if another enqueue() happens
+								// log(" - nevermind; queued has been advanced already")
+							}
+						}
+						// if node.next was still null, then any future enqueues must not yet
+						// have checked `queued`; they will see the spare capacity
 					} else {
+						// log(s"dequeueing next item (${System.identityHashCode(nextQueued)})")
 						queued.set(new Queued(bufLen, nextQueued))
 						// notify the lucky winner
 						nextQueued.item.enqueuedAsync()
 						val completedRemaining = numCompleted - 1
 						if (completedRemaining > 0) {
+							// log(s"completing another $completedRemaining")
 							tryUpdate(completedRemaining)
 						}
 					}
 				} else {
 					// We're not at capacity. If threads enqueue more tasks in the meantime
 					// this CAS will fail and we'll loop again
-					// println("queued = " + currentQueued)
 					if (!queued.compareAndSet(currentQueued, currentQueued)) {
 						tryUpdate(numCompleted)
 					}

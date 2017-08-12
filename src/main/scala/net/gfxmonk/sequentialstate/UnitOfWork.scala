@@ -44,13 +44,7 @@ object UnitOfWork {
 	}
 
 	trait HasEnqueuePromise[A] {
-		@volatile var _enqueuedPromise: Promise[A] = null
-		def enqueuedPromise: Promise[A] = {
-			if (_enqueuedPromise == null) {
-				_enqueuedPromise = Promise()
-			}
-			_enqueuedPromise
-		}
+		var enqueuedPromise = Promise[A]()
 	}
 
 	trait HasResultPromise[A] {

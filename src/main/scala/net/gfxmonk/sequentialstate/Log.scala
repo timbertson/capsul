@@ -14,6 +14,10 @@ private [sequentialstate] class Log(id: String, buf: Log.LogBuffer) {
 	}
 }
 
+private [sequentialstate] class NoopLog() {
+	def apply(s: String) = ()
+}
+
 private [sequentialstate] object Log {
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
@@ -70,9 +74,16 @@ private [sequentialstate] object Log {
 	def apply(buf: LogBuffer, s: String) {
 		val time = System.nanoTime()
 		buf.enqueue(time -> s)
+		if (buf.length > 1000) {
+			buf.dequeue()
+		}
 	}
 
+	def test(s: String) = if (enabled) apply(s)
+	def testId(desc: String) = if (enabled) id(desc) else new NoopLog()
+
 	def dump(n: Int) {
+		if(!enabled) return
 		threads.synchronized {
 			val buffers = threads.map { case (tid,logs) =>
 				logs.map (log => (tid,log))

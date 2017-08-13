@@ -94,7 +94,7 @@ object CounterActor {
 class CounterState()(implicit ec: ExecutionContext) {
 	private val state = SequentialState(0)
 	def inc() = state.sendTransform { current =>
-		// Log(s"incrementing $current -> ${current+1}")
+		// Log.test(s"incrementing $current -> ${current+1}")
 		current+1
 	}
 	def dec() = state.sendTransform(_-1)
@@ -114,32 +114,11 @@ object CounterState {
 
 	def runWithBackpressure(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
 		val counter = new CounterState()
-		// val stop = Promise[Unit]()
-		// @volatile var th:Option[Thread] = None
-		// val timeout = Future {
-		// 	th = Some(Thread.currentThread())
-		// 	try {
-		// 		Thread.sleep(5000)
-		// 		th = None
-		// 	} catch {
-		// 		case e:InterruptedException => ()
-		// 		th = None
-		// 	}
-		// }
-    //
-		// Future.firstCompletedOf(Seq(stop.future, timeout)).onComplete { _ =>
-		// 	if(timeout.isCompleted) {
-		// 		Log("*** timeout triggered")
-		// 	}
-		// 	th.foreach(_.interrupt())
-		// }
-
 		def loop(i:Int): Future[Int] = {
-			// val log = Log.id(s"runWithBackpressure($i)")
+			// val log = Log.testId(s"runWithBackpressure($i)")
 			val start = System.currentTimeMillis()
 			if (i == 0) {
 				// log("EOF")
-				// stop.success(())
 				counter.current
 			} else {
 				val p = counter.inc()
@@ -430,6 +409,7 @@ object PerfExample {
 			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {
+			Log.test("** failed **")
 			Log.dump(400)
 			println(result)
 		}
@@ -445,9 +425,9 @@ object PerfExample {
 			val results = mutable.Set[Any]()
 			while(attempt>0) {
 				Log.clear()
-				Log(s"$name: begin attempt $attempt")
+				Log.test(s"$name: begin attempt $attempt")
 				val (cost,result) = time(fn)
-				Log(s"$name: end attempt $attempt")
+				Log.test(s"$name: end attempt $attempt")
 				results.add(result)
 				if (attempt <= n) {
 					times.enqueue(cost)
@@ -466,7 +446,6 @@ object PerfExample {
 	}
 
 	def run(): Unit = {
-		Log.enable()
 		val repeat = this.repeat(20) _
 		val bufLen = 10
 

@@ -76,39 +76,46 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	//             occupy a slot in this state's queue until the StagedFuture
 	//             is accepted.
 
-	def sendTransform(fn: Function[T,T]): Future[Unit] =
+	def sendTransform(fn: T => T): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(fn(state.current))))
 
 	def sendSet(updated: T): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(updated)))
 
-	def sendAccess(fn: Function[T,_]): Future[Unit] =
+	def sendAccess(fn: T => _): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => fn(state.current)))
 
-	def sendAccessStaged[A](fn: Function[T,StagedFuture[A]])(implicit ec: ExecutionContext): Future[Unit] =
+	def sendAccessStaged[A](fn: T => StagedFuture[A])(implicit ec: ExecutionContext): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyStaged(() => fn(state.current)))
 
-	def sendAccessAsync[A](fn: Function[T,StagedFuture[A]]): Future[Unit] =
+	def sendAccessAsync[A](fn: T => StagedFuture[A]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
 	def current: Future[T] =
 		thread.enqueue(UnitOfWork.Full(() => state.current))
 
-	def mutate[R](fn: Function[Ref[T],R]): StagedFuture[R] =
+	def mutate[R](fn: Ref[T] => R): StagedFuture[R] =
 		thread.enqueue(UnitOfWork.Full(() => fn(state)))
 
-	def access[R](fn: Function[T,R]): StagedFuture[R] =
+	def transform(fn: T => T): StagedFuture[T] =
+		thread.enqueue(UnitOfWork.Full { () =>
+			val updated = fn(state.current)
+			state.set(updated)
+			updated
+		})
+
+	def access[R](fn: T => R): StagedFuture[R] =
 		thread.enqueue(UnitOfWork.Full(() => fn(state.current)))
 
-	def mutateStaged[R](fn: Function[Ref[T],StagedFuture[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
+	def mutateStaged[R](fn: Ref[T] => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state)))
 
-	def mutateAsync[R](fn: Function[Ref[T],Future[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
+	def mutateAsync[R](fn: Ref[T] => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state)))
 
-	def accessStaged[R](fn: Function[T,StagedFuture[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
+	def accessStaged[R](fn: T => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state.current)))
 
-	def accessAsync[R](fn: Function[T,Future[R]])(implicit ec: ExecutionContext): StagedFuture[R] =
+	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
 }

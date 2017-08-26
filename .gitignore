@@ -1,3 +1,4 @@
 target/
 /examples/project/
-/.idea
+.idea/
+

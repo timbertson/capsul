@@ -1,12 +1,12 @@
 #!bash -eu
 gup --always
 cd ..
-# sbt doc
+sbt doc
 scaladir="$(ls -1 target | grep 'scala-')"
 numlines="$(echo "$scaladir" | wc -l)"
 if [ "$numlines" != 1 ]; then
 	echo -e "Unable to determine \$scaladir ($numlines dirs found):\n$scaladir"
 	exit 1
 fi
-ln -sfn "../target/$scaladir/api" "$1"
+cp -a "target/$scaladir/api" "$1"
 

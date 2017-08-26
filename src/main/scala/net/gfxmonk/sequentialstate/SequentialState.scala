@@ -38,7 +38,7 @@ Methods are named <dispatch><operation><mode>
 
 == Dispatch types: ==
 
- - '''send''':   Enqueue an action, returning [[Future[Unit]]]. Once the future is resolved, the
+ - '''send''':   Enqueue an action, returning [[Future]][Unit]. Once the future is resolved, the
                  action has been accepted by the worker, but not necessarily performed.
 
  - '''(none)''': Perform an action, returning a [[StagedFuture]][T].
@@ -93,11 +93,11 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def sendAccess(fn: T => _): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => fn(state.current)))
 
-	/** Send an access operation which returns a [[StagedFuture[R]]] */
+	/** Send an access operation which returns a [[StagedFuture]][R] */
 	def sendAccessStaged[A](fn: T => StagedFuture[A])(implicit ec: ExecutionContext): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyStaged(() => fn(state.current)))
 
-	/** Send an access operation which returns a [[Future[R]]] */
+	/** Send an access operation which returns a [[Future]][R] */
 	def sendAccessAsync[A](fn: T => StagedFuture[A]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
@@ -121,19 +121,19 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 	def access[R](fn: T => R): StagedFuture[R] =
 		thread.enqueue(UnitOfWork.Full(() => fn(state.current)))
 
-	/** Perform a mutation which returns a [[StagedFuture[R]] */
+	/** Perform a mutation which returns a [[StagedFuture]][R] */
 	def mutateStaged[R](fn: Ref[T] => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state)))
 
-	/** Perform a mutation which returns a [[Future[R]] */
+	/** Perform a mutation which returns a [[Future]][R] */
 	def mutateAsync[R](fn: Ref[T] => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state)))
 
-	/** Perform an access which returns a [[StagedFuture[R]] */
+	/** Perform an access which returns a [[StagedFuture]][R] */
 	def accessStaged[R](fn: T => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state.current)))
 
-	/** Perform an access which returns a [[Future[R]] */
+	/** Perform an access which returns a [[Future]][R] */
 	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
 }

@@ -2,15 +2,20 @@
 
 A minimal, type-safe alternative to (some of) akka.
 
+**Quick links:**
+
+ - [API docs](https://timbertson.github.io/sequentialstate/api/net/gfxmonk/sequentialstate/)
+ - [examples](./examples/src/main/scala/net/gfxmonk/sequentialstate/examples) for working examples.
+
 ## Why should I use SequentialState?
+
+_SequentialState provides the same concurrency model as local actors, plus type safety and builtin support for non-blocking backpressure. It achieves this by simply encapsulating state, doing away with most other features of actors._
 
 Parallel programming (using locks, mutexes, etc) is still a surprisingly error-prone task even in modern scala. While you rarely need to implement your own concurrency primitives, you do need to use the builtin ones correctly. That isn't always straightforward or efficient, and frequently requires diligence that cannot be enforced by the compiler.
 
 I liked the simple concurrency guarantees of actors, but found that akka was unfitting for many purposes. I realised that I didn't want my system to be composed of actors, I was happy with _mostly_ stateless functional programming. But for the places where I must maintain state, I needed something better than a lock.
 
 Also, when learning about akka-streams and monix (and the reactive streams protocol), I was dismayed to realise that plain akka provides no building blocks for dealing with backpressure and preventing overload.
-
-SequentialState provides the same concurrency model as local actors, plus type safety and builtin support for non-blocking backpressure. It achieves this by simply encapsulating state, doing away with most other features of actors.
 
 
 ## Simple example:
@@ -66,10 +71,6 @@ The counter ended up being: 7
 
 Unlike actors, SequentialState instances are typically `private` and do not talk to each other directly. Since they encapsulate state, you typically use them to wrap the internal state of classes which need to be thread-safe.
 
-For the full API see the [API docs](https://timbertson.github.io/sequentialstate/api/net/gfxmonk/sequentialstate/)
-
-See [examples](./examples) for working examples.
-
 ## How do I install it?
 
 TODO: packaging ;)
@@ -105,3 +106,27 @@ Actors define a heirarchy, primarily for supervision and error handling purposes
 - High level pipeline DSL (a.k.a Reactive Streams):
 
 SequentialState is a replacement for local actors, not for a fully fledged data pipeline like akka-streams, monix, etc. If your problem is well represented by a data pipeline, you should probably use one.
+
+### How does backpressure work?
+
+Synchronous backpressure is reasonably straightforward with a traditional bounded, blocking queue. Each component has a queue of tasks which you can add to. Once that queue reaches capacity, it won't allow more tasks to be enqueued. This is done by blocking the thread trying to enqueue more work until space is available.
+
+To avoid actually tying up a thread (potentially leading to deadlocks), SequentialState blocks the caller by always returning a `StagedFuture` which won't be `accepted` until the work has successfully been enqueued. Space is freed up in a queue after a task has run. **Note** that this requires code enqueueing work to be "good citizens" -- you should not enqueue more work until the previous work has been accepted.
+
+This solution is all you need for synchronous tasks - once the item has been run, it is complete. But for asynchronous tasks (which run some code that creates and returns a `Future[T]`), there are two stages to each task:
+
+ - (synchronous) **started**; the running of the task which creates a `Future[T]`
+ - (asynchronous) **completed**, the point when the `Future[T]` succeeds (or fails)
+
+SequentialState will naturally apply backpressure to the _starting_ of asynchronous tasks, since that part runs synchronously.
+
+But for the asynchronous completion of the work, we need to make _started-but-incomplete_ tasks still occupy a slot in the work queue. This ensures that (for example) a component with a capacity of 10 queued tasks will prevent further tasks from being enqueued once it has:
+
+ - 10 enqueued (not executed) tasks, or
+ - 9 enqueued tasks plus one run-but-incomplete asynchronous task, or
+ - 5 enqueued tasks plus 5 run-but-incomplete asynchronous task, or
+ - 10 run-but-incomplete asynchronous tasks, (etc...)
+
+To get this behaviour, you must call the `Async` or `Staged` versions of the methods on a `SequentialState` object - e.g. `mutateAsync`, `accessAsync`, `mutateStaged`, etc. Using the non-async variants is typically awkward enough to make this obvious, as you will end up with a nested `StagedFuture[Future[T]]` which requires flattening - when you see this, you should usually use the `Async` variant instead.
+
+The only difference between these two variants is that `Async` (tasks returning a plain `Future`) occupy a task slot until they complete, while `Staged` (tasks returning a `StagedFuture`) occupy a task slot until they are accepted (at which point they will be occupying a task slot in some other `SequentialState` object's queue, typically). The `Staged` variant is useful for chaining together multiple `SequentialState` actions.

@@ -66,7 +66,7 @@ The counter ended up being: 7
 
 Unlike actors, SequentialState instances are typically `private` and do not talk to each other directly. Since they encapsulate state, you typically use them to wrap the internal state of classes which need to be thread-safe.
 
-For the full API see [SequentialState.scala](./src/main/scala/net/gfxmonk/sequentialstate/SequentialState.scala) (TODO: publish docs)
+For the full API see the [API docs](https://timbertson.github.io/sequentialstate/api/net/gfxmonk/sequentialstate/)
 
 See [examples](./examples) for working examples.
 

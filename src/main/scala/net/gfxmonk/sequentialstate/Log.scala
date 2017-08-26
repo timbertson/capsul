@@ -7,14 +7,18 @@ import scala.collection.mutable
 // for debugging issues (SequentialExecutor is augmented
 // with commented-out log calls)
 
-private [sequentialstate] class Log(id: String, buf: Log.LogBuffer) {
+private [sequentialstate] trait LogLike {
+	def apply(s: String): Unit
+}
+
+private [sequentialstate] class Log(id: String, buf: Log.LogBuffer) extends LogLike {
 	val prefix = s"[$id]: "
 	def apply(s: String) {
 		Log(buf, prefix+s)
 	}
 }
 
-private [sequentialstate] class NoopLog() {
+private [sequentialstate] class NoopLog() extends LogLike {
 	def apply(s: String) = ()
 }
 
@@ -61,6 +65,13 @@ private [sequentialstate] object Log {
 		nextId += 1
 		new Log(s"$desc.$nextId", threadBuffer)
 	}
+
+	def id(obj: Any, desc: String) = {
+		nextId += 1
+		val id = if (obj == null) nextId else s"${System.identityHashCode(obj)}.$nextId"
+		new Log(s"$desc@$id", threadBuffer)
+	}
+
 	def clear() {
 		threads.synchronized {
 			threads.clear()
@@ -80,7 +91,7 @@ private [sequentialstate] object Log {
 	}
 
 	def test(s: String) = if (enabled) apply(s)
-	def testId(desc: String) = if (enabled) id(desc) else new NoopLog()
+	def testId(desc: String): LogLike = if (enabled) id(desc) else new NoopLog()
 
 	def dump(n: Int) {
 		if(!enabled) return

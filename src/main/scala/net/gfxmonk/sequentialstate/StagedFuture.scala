@@ -4,18 +4,27 @@ import scala.util._
 import scala.concurrent._
 import scala.concurrent.duration._
 
+/**
+A staged future represents both asynchronous acceptance and asynchronous
+fulfilment of a piece of work.
+
+By explicitly representing asynchronous acceptance, consumers can implement
+backpressure without resorting to synchronous blocking.
+
+It's conceptually just a `Future[Future[T]]`, where the outer future is
+resolved once the receiver has accepted the work, and the inner future
+is resolved once the work is actually complete. For convenience, it also
+implements [[Future]][T] so you can wait for the final result easily when
+necessary.
+
+The only additional methods on top of [[Future]] are:
+
+ - [[accepted]]
+ - [[isAccepted]]
+ - [[onAccept]]
+
+*/
 trait StagedFuture[T] extends Future[T] {
-	/*
-	 * A staged future represents both asynchronous acceptance and asynchronous
-	 * fulfilment of a piece of work.
-	 *
-	 * It's conceptually just a Future[Future[T]], where the outer future is
-	 * resolved once the receiver has accepted the work, and the inner future
-	 * is resolved once the work is actually complete.
-	 *
-	 * By explicitly representing asynchronous acceptance, consumers can implement
-	 * backpressure without resorting to synchronous blocking.
-	 */
 	def accepted: Future[Future[T]]
 	def isAccepted: Boolean
 	def onAccept[U](fn: Future[T] => U)(implicit ex: ExecutionContext): Unit

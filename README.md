@@ -7,7 +7,7 @@ A minimal, type-safe alternative to (some of) akka.
  - [API docs](https://timbertson.github.io/sequentialstate/api/net/gfxmonk/sequentialstate/)
  - [examples](./examples/src/main/scala/net/gfxmonk/sequentialstate/examples) for working examples.
 
-I also presented an introduction to SequentialState at the [Melbourne Scala User Group](https://www.meetup.com/en-AU/Melbourne-Scala-User-Group/) in August 2017, you can see the [slides](https://timbertson.github.io/sequentialstate/talk/) (with speaker notes).
+I also presented an introduction to SequentialState at the [Melbourne Scala User Group](https://www.meetup.com/en-AU/Melbourne-Scala-User-Group/) in August 2017, you can see the [video](https://youtu.be/WsE4S8qDjgk) and [slides](https://timbertson.github.io/sequentialstate/talk/) (with speaker notes).
 
 ## Why should I use SequentialState?
 

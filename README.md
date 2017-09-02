@@ -73,9 +73,13 @@ The counter ended up being: 7
 
 Unlike actors, SequentialState instances are typically `private` and do not talk to each other directly. Since they encapsulate state, you typically use them to wrap the internal state of classes which need to be thread-safe.
 
-## How do I install it?
+## How do I use it?
 
-TODO: packaging ;)
+Add to build.sbt:
+
+```
+libraryDependencies += "net.gfxmonk" %% "sequentialstate" % "0.1.0"
+```
 
 ### What features does it have?
 

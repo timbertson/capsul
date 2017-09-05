@@ -16,7 +16,7 @@ object SequentialExecutor {
 private final class Node[A](val item: A) {
 	@volatile var next: Node[A] = null
 	final def appearsAfter[A](parent: Node[A]): Boolean = {
-		var node = parent.next
+		var node = parent
 		while(node != null) {
 			if (node == this) {
 				return true
@@ -108,20 +108,20 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 						// log("below capacity, but new node is already enqueued")
 						return true
 					} else {
-						if (newTail.appearsAfter(currentQueued.node)) {
+						val queuedNode = currentQueued.node
+						if (newTail.appearsAfter(queuedNode)) {
 							// We need `queued` to advance until either we reach buflen or the
 							// task we added, and any thread knows enough to do that. Give it a go,
 							// but don't retry if someone beats us to it.
 							// log("below capacity; attempting to advance queued by one")
 							val _:Boolean = queued.compareAndSet(currentQueued, currentQueued.add(currentQueued.node.next))
+						} else if (queuedNode != null && queuedNode.appearsAfter(newTail)) {
+								// log("another thread has advanced `queued` past the node I inserted");
+								return true;
 						} else {
-							// OR, there are two possibilities:
-							//  - queued has advanced past newTail
-							//  - the entire stack that we were added to has been completed,
-							//    and queued is now a new stack
-							// Either way, we were certainly enqueued.
-							// log("below capacity; but I don't see myself in the node chain")
-							return true
+							// current chain may be new, and the enqueuer has not initialized queued yet
+							// log("node and queued are not in the same chain; spinning until consistent");
+							LockSupport.parkNanos(100)
 						}
 					}
 				}
@@ -278,23 +278,33 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		{
 			// val log = Log.id("advanceNode")
 			// var logNullifyTailAttempts = 0
+			val waitTime = 100
 			while (node.next == null) {
+				// looks like we've hit the tail.
 				// logNullifyTailAttempts += 1
 				// if(logNullifyTailAttempts>5) log("tail nullify attempts: " + logNullifyTailAttempts)
-	
-				// looks like we've hit the tail. We need to save storedInProgress eagerly,
-				// as the next run could potentially occur the moment we set `headNode`
-				// to null
-				storedInProgress = inProgress
-				if (tail.compareAndSet(node, null)) {
-					// log(s"completed last item (${System.identityHashCode(node)}); storedInProgress has ${inProgress.length}")
-					head.compareAndSet(headNode, null) // best effort; helps with GC
-					return null
-				} else {
-					// `node` isn't really the tail, so we just need to spin, waiting for
-					// its `.next` property to be set
-					LockSupport.parkNanos(100)
+
+				// The enqueueing thread of any final task will eventually
+				// update `queued` to include it (since there must be capacity).
+				// To prevent an inconsistent view of the world in `doEnqueue`,
+				// don't break this chain until queued matches tail.
+				val currentQueued = queued.get
+				if (currentQueued.node.eq(node)) {
+					// We need to save storedInProgress, as the next run could
+					// occur the moment we set `headNode` to null
+					storedInProgress = inProgress
+					if (tail.compareAndSet(node, null)) {
+						// log(s"completed last item (${System.identityHashCode(node)}); storedInProgress has ${inProgress.length}")
+						head.compareAndSet(headNode, null) // best effort; helps with GC
+						return null
+					}
 				}
+				// We've interrupted an enqueuer thread -- either
+				// node.next is about to be populated, or queued still needs to
+				// be updated to include the final node in the chain.
+				//
+				// Either way, we just wait until that thread has progressed and try again.
+				LockSupport.parkNanos(waitTime)
 			}
 			// log(s"advanced")
 			node.next

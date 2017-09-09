@@ -34,12 +34,6 @@ lazy val log = (project in file("log")).settings(
 lazy val core = (project in file("core")).settings(
   commonSettings,
   libraryDependencies += scalaReflect,
-  // include log sources / classes in published jars
-  mappings in (Compile, packageSrc) ++= mappings.in(log, Compile, packageSrc).value,
-  mappings in (Compile, packageBin) ++= mappings.in(log, Compile, packageBin).value,
-
-  // export as jar so that `examples` doesn't have to depend on log
-  exportJars := true,
   name := "sequentialstate"
 ).dependsOn(log % "compile-internal")
 

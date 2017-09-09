@@ -1,7 +1,6 @@
 package net.gfxmonk.sequentialstate.examples
 import net.gfxmonk.sequentialstate._
 
-import monix.eval.Task
 import monix.execution.atomic.{Atomic, AtomicAny}
 import monix.execution.misc.NonFatal
 import java.util.concurrent.{Executors, TimeUnit}

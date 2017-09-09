@@ -1,4 +1,4 @@
-package net.gfxmonk.sequentialstate.examples
+package net.gfxmonk.sequentialstate.perf
 import net.gfxmonk.sequentialstate._
 
 import monix.eval.Task
@@ -211,7 +211,7 @@ case class PipelineConfig(stages: Int, len: Int, bufLen: Int, parallelism: Int, 
 object Pipeline {
 	import Log.log
 	def run(conf: PipelineConfig)(implicit ec: ExecutionContext): Future[Int] = {
-		val threadPool = PerfExample.makeThreadPool(conf.parallelism)
+		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		val source = Iterable.range(0, conf.len).toIterator
@@ -291,7 +291,7 @@ object Pipeline {
 
 	def runMonix(conf: PipelineConfig)(implicit sched: monix.execution.Scheduler):Future[Int] = {
 
-		val threadPool = PerfExample.makeThreadPool(conf.parallelism)
+		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		import monix.eval._
@@ -330,7 +330,7 @@ object Pipeline {
 		import akka.{ NotUsed, Done }
 		import scala.concurrent._
 
-		val threadPool = PerfExample.makeThreadPool(conf.parallelism)
+		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		val source: Source[Option[Int], NotUsed] = Source.fromIterator(() =>
@@ -369,7 +369,7 @@ object Pipeline {
 
 }
 
-object PerfExample {
+object PerfTest {
 	def makeThreadPool(parallelism: Int) = {
 		// Executors.newFixedThreadPool(parallelism)
 		new ForkJoinPool(parallelism)
@@ -463,7 +463,7 @@ object PerfExample {
 		}
 	}
 
-	def run(): Unit = {
+	def main(): Unit = {
 		val repeat = this.repeat(20) _
 		val bufLen = 10
 
@@ -516,16 +516,9 @@ object PerfExample {
 
 object LongLivedLoop {
 	def main(): Unit = {
-		val threadPool = PerfExample.makeThreadPool(4)
+		val threadPool = PerfTest.makeThreadPool(4)
 		implicit val ec = ExecutionContext.fromExecutor(threadPool)
 		Await.result(CounterState.run(Int.MaxValue), Duration.Inf)
 	}
 }
 
-
-object PerfTest {
-	def main():Unit = {
-		PerfExample.run
-//		LongLivedLoop.main()
-	}
-}

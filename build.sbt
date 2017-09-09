@@ -1,6 +1,12 @@
+// vim: set syntax=scala:
+
 val scalaVer = "2.12.1"
 
 val monixVersion = "2.3.0"
+
+val akkaVersion = "2.5.3"
+
+val scalaReflect = "org.scala-lang" % "scala-reflect" % scalaVer
 
 val commonSettings = Seq(
   scalaVersion := scalaVer,
@@ -13,24 +19,43 @@ val commonSettings = Seq(
   libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
 )
 
+val hiddenProject = commonSettings ++ Seq(
+  publish := {},
+  publishLocal := {}
+)
+
 lazy val log = (project in file("log")).settings(
-  commonSettings,
+  hiddenProject,
   scalacOptions ++= Seq("-language:experimental.macros"),
-  libraryDependencies += "org.scala-lang" % "scala-reflect" % scalaVer,
+  libraryDependencies += scalaReflect,
   name := "sequentialstate-log"
 )
 
 lazy val core = (project in file("core")).settings(
   commonSettings,
+  libraryDependencies += scalaReflect,
+  // include log sources / classes in published jars
+  mappings in (Compile, packageSrc) ++= mappings.in(log, Compile, packageSrc).value,
+  mappings in (Compile, packageBin) ++= mappings.in(log, Compile, packageBin).value,
+
+  // export as jar so that `examples` doesn't have to depend on log
+  exportJars := true,
   name := "sequentialstate"
-) dependsOn log
+).dependsOn(log % "compile-internal")
+
+lazy val perf = (project in file("perf")).settings(
+  hiddenProject,
+  libraryDependencies += "io.monix" %% "monix" % monixVersion,
+  libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
+  name := "sequentialstate-perf"
+).dependsOn(core).dependsOn(log % "compile-internal")
 
 lazy val examples = (project in file("examples")).settings(
-  commonSettings,
-  libraryDependencies += "io.monix" %% "monix" % monixVersion,
-  libraryDependencies += "com.typesafe.akka" %% "akka-stream" % "2.5.3",
+  hiddenProject,
+  libraryDependencies += "io.monix" %% "monix-eval" % monixVersion,
+  libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-examples"
-) dependsOn core
+).dependsOn(core)
 
 
 publishMavenStyle := true

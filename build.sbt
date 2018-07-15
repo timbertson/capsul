@@ -16,6 +16,7 @@ val commonSettings = Seq(
   version := "0.1.1-SNAPSHOT",
 
   libraryDependencies += "io.monix" %% "monix-execution" % monixVersion,
+  libraryDependencies += "com.lmax" % "disruptor" % "3.4.1",
   libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
 )
 

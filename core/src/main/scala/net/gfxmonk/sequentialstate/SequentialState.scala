@@ -65,7 +65,7 @@ after the function completes, but the task won't be considered done
 
 This means that you must be careful with `mutate` actions or with mutable
 state objects - you may mutate the state during the execution of the
-function, but you may not do so asynchronously (e.g. when your future
+function, but you may not do so asynchronously (e.g. after your future
 completes)
 
  - '''(empty)''': Synchronous. The task is completed as soon as it returns.

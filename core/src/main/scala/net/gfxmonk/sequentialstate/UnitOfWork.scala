@@ -23,12 +23,8 @@ trait UnitOfWork[A] extends EnqueueableTask {
 		try {
 			reportSuccess(fn())
 		} catch {
-			case e:Throwable => {
-				if (NonFatal(e)) {
-					reportFailure(e)
-				} else {
-					throw e
-				}
+			case NonFatal(e) => {
+				reportFailure(e)
 			}
 		}
 	}

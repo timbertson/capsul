@@ -35,6 +35,10 @@ trait UnitOfWork[A] extends EnqueueableTask {
 }
 
 object UnitOfWork {
+	val noop: EnqueueableTask = new EnqueueableTask {
+		override def enqueuedAsync() = ()
+		override def run() = None
+	}
 	trait HasExecutionContext {
 		protected val ec: ExecutionContext
 	}

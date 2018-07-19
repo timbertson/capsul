@@ -1,4 +1,5 @@
 package net.gfxmonk.sequentialstate.examples
+import net.gfxmonk.sequentialstate.internal.Log
 
 object Main extends App {
 	println("== readme")
@@ -9,4 +10,5 @@ object Main extends App {
 	async.ExampleMain.main()
 	println("== chain")
 	chain.ExampleMain.main()
+	Log.dump(200)
 }

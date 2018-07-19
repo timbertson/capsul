@@ -50,7 +50,7 @@ lazy val examples = (project in file("examples")).settings(
   libraryDependencies += "io.monix" %% "monix-eval" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-examples"
-).dependsOn(core)
+).dependsOn(core).dependsOn(log % "compile-internal")
 
 
 publishMavenStyle := true

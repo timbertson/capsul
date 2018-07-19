@@ -233,9 +233,15 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// couldn't reserve tail, or gazumped by queued work. retry
 			return doEnqueue(work)
 		} else {
-			log(s"putting item in queue")
+			log(s"putting item in queue ($currentHead, $currentTail)")
 			ring.queue.add(work)
 			ring.tailRef.transform(Ring.incrementQueued)
+			// while(true) {
+			// 	// TODO need to ensure workLoop is running.
+			// 	val ready = ring.readyRef.get
+			// 	if (!Ring.ready
+			// 	if (ring.readyRef.compareAndSet(ready, 
+			// }
 			return false
 		}
 	}
@@ -287,6 +293,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 						// now that we've incremented running futures, set it up to decrement on completion
 						f.onComplete { _ =>
 							ring.headRef.transform(ring.decrementRunningFutures)
+							//TODO: ensure workLoop is running
 						}
 					}
 				}

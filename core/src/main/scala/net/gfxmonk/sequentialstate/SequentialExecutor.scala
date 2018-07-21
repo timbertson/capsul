@@ -94,27 +94,30 @@ object Ring {
 	type TailIdx = Int
 	type QueueSize = Int
 	type PromiseCount = Int
+
+	// TODO: state could be more efficiently stored as a packed (4,4,8) Long,
+	// as long as I can figure out signed operations. We'll keep this
+	// commented-out because it's much easier to debug
 	type State = (HeadIdx, TailIdx, QueueSize)
+	def make(head: HeadIdx, tail: TailIdx, numQueued: QueueSize) = {
+		(head, tail, numQueued)
+	}
+	def headIndex(t:State) = t._1
+	def tailIndex(t:State) = t._2
+	def numQueued(t:State) = t._3
 
 	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
 	// I don't trust unsigned maths, so subtract one bit for safety :shrug:
 	val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
 	val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
 
-	def tailIndex(t:State) = t._1
-	def headIndex(t:State) = t._2
-	def numQueued(t:State) = t._3
 	def queueSpaceExhausted(t: State) = numQueued(t) == MAX_QUEUED
-	// def hasQueuedWork(t:Tail) = numQueued(t) != 0
-	def incrementQueued(t:State) = (headIndex(t), tailIndex(t), numQueued(t) + 1)
-	// def decrementQueued(t:Tail) = (tailIndex(t), numQueued(t) - 1)
-
-	def incrementRunningFutures(i:PromiseCount) = i+1
-	def decrementRunningFutures(i:PromiseCount) = i-1
-	// def withHeadIndex(t:Head, i: Idx) = (i, numRunningFutures(t))
+	def incrementQueued(t:State) = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
 
 	// if there's no work, we are (or should be) stopped
 	def isStopped(t:State) = tailIndex(t) == headIndex(t)
+	def incrementRunningFutures(i:PromiseCount) = i+1
+	def decrementRunningFutures(i:PromiseCount) = i-1
 }
 
 class Ring[T >: Null <: AnyRef](size: Int) {
@@ -130,41 +133,50 @@ class Ring[T >: Null <: AnyRef](size: Int) {
 	private var arr = Array.fill(size)(new RingItem[T])
 
 	// RING
-	def at(idx: Idx) = arr(idx % size) // unsafe woo
-	def add(a: Idx, b: Int) = {
-		(a + b) % bounds
+	def mask(idx: Idx) = (idx % size)
+	def at(idx: Idx) = arr(mask(idx)) // unsafe woo
+	def add(i: Idx, n: Int) = {
+		// assumes `n` is never greater than `size`
+		val result = i + n
+		if (result >= bounds) {
+			result - bounds
+		} else {
+			result
+		}
 	}
-	def inc(a: Idx) = add(a, 1) // TODO specialize?
+	def inc(a: Idx) = {
+		// assuming this is more efficient than add(a,1)
+		if (a == negativeOne) 0 else a + 1
+	}
 	// actually adding a negative is problematic due to `%` behaviour for negatives
 	def dec(a: Idx) = add(a, negativeOne)
 
-	def spaceBetween(head: Idx, tail: Idx):Int = {
+	def numItems(head: Idx, tail: Idx):Int = {
 		// queue is full when tail has wrapped around to one less than head
 		val diff = tail - head
 		if (diff < 0) {
-			diff + size // there's never negative space available
+			diff + bounds // there's never negative space available, wrap around
 		} else {
 			diff
 		}
 	}
 
 	def spaceAvailable(s: State, numFutures: Int):Int = {
-		// XXX reuse `spaceBetween`
-		// queue is full when tail has wrapped around to one less than head
-		var diff = add(headIndex(s), size) - tailIndex(s)
-		if (diff < 0) diff = diff + size // there's never negative space available
-
-		if (diff > 0) diff = diff - numFutures
+		val space = size - numItems(Ring.headIndex(s), Ring.tailIndex(s)) - numFutures
 		// Note: numFuturesRef is not synchronized with the rest of state; it may be inaccurate
-		if (diff < 0) diff = 0
-		return diff
+		// (causing a negative space value)
+		if (space < 0) {
+			0
+		} else {
+			space
+		}
 	}
 
-	def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int) = {
+	def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int): State = {
 		// dequeue up to numDequeue & reserve up to (numDequeue + numWork) ring slots
 		val head = headIndex(t)
 		val tail = tailIndex(t)
-		(head, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
+		make(head, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
 	}
 }
 
@@ -179,7 +191,6 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
 	private val stateRef:AtomicAny[Ring.State] = Atomic((0,0,0))
 	private val numFuturesRef:AtomicInt = Atomic(0)
-
 
 	import Log.log
 	import Ring._
@@ -362,7 +373,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			var maxItems = _maxItems
 
 			val currentTail = Ring.tailIndex(state)
-			val readyItems = ring.spaceBetween(currentHead, currentTail)
+			val readyItems = ring.numItems(currentHead, currentTail)
 
 			// There must be something pending. Only this loop updates head, and
 			// it terminates if head becomes empty

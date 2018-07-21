@@ -10,16 +10,17 @@ import scala.collection.mutable
 class RingSpec extends FunSpec {
 	import Ring._
 
-	// we're only testing pure functions on ring, so we can reuse an instance
 	val size = 10
 	val minIndex = 0
 	val maxIndex = 19
 	val validIndices = (minIndex to maxIndex).toList
 	val validSizes = (minIndex to size).toList
-	val ring = new Ring(size)
 	def emptyState(idx: Int = 0) = (idx, idx, 0)
 	def fullState(idx: Int = 0) = (idx, idx, 0)
 	def withItems(idx: Int, n: Int) = (idx, ring.add(idx, n), 0)
+
+	// we're only testing pure functions on ring, so we can reuse an instance
+	val ring = new Ring(size)
 
 	def actsLike[Item,Ret](range:Seq[Item], a: Function[Item,Ret], b: Function[Item,Ret]): Unit = {
 		val inputs = range.toList

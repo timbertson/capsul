@@ -3,11 +3,13 @@ package net.gfxmonk.sequentialstate
 import java.util.concurrent.{ExecutorService, Executors}
 
 import org.scalatest._
+import org.scalatest.concurrent._
 
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.collection.immutable.Queue
 import scala.collection.mutable
+import net.gfxmonk.sequentialstate.internal.Log
 
 object SequentialExecutorSpec {
 	def group[A](items: List[A]): List[(A, Int)] = {
@@ -95,7 +97,16 @@ object SequentialExecutorSpec {
 			}
 			threadPool = Some(Executors.newFixedThreadPool(3))
 		}
-		def shutdown() = threadPool.foreach(_.shutdown())
+
+		def shutdown() = {
+			threadPool.foreach(_.shutdown())
+		}
+
+		def killAndReset() = {
+			threadPool.foreach(_.shutdownNow())
+			threadPool = None
+			init()
+		}
 
 		class Count {
 			var current = 0
@@ -105,10 +116,42 @@ object SequentialExecutorSpec {
 	}
 }
 
-class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
+class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLimitedTests
+{
 	import SequentialExecutorSpec._
 	override def beforeAll = Ctx.init()
 	override def afterAll = Ctx.shutdown()
+
+	val timeLimit = 10.seconds
+	var logsDumped = false
+
+	private def dumpLogs(dumper: Function2[String,Option[Any],Unit]) {
+		if(!logsDumped) {
+			logsDumped = true
+			Log.dumpTo(100, lines => lines.foreach(dumper(_, None)))
+		}
+	}
+
+	override val defaultTestSignaler = new Signaler {
+		def apply(testThread: Thread) {
+			alert("--- Interrupted ---")
+			dumpLogs(alert.apply)
+			Ctx.killAndReset()
+			ThreadSignaler(testThread)
+		}
+	}
+
+	override def withFixture(test: NoArgTest): Outcome = {
+		logsDumped = false
+		val result = super.withFixture(test)
+		result match {
+			case Failed(_) | Canceled(_) => {
+				dumpLogs(info.apply)
+			}
+			case _ => ()
+		}
+		result
+	}
 
 	describe("synchronous tasks") {
 
@@ -155,19 +198,19 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll {
 		}
 
 		it("executes up to 200 jobs in a single loop") {
-			val ctx = Ctx.withThreadPool(bufLen = 400); import ctx._
+			val ctx = Ctx.withThreadPool(bufLen = 50); import ctx._
 
 			awaitAll(List.fill(200)(ex.enqueue(inc(sleep=1))))
 			assert(queuedRunLoops.length == 1)
 			assert(count.current == 200)
 		}
 
-		it("defers jobs into a new loop after 200 to prevent starvation") {
-			val ctx = Ctx.withThreadPool(bufLen = 400); import ctx._
+		it("defers jobs into a new loop after 200 (rounded to batch size) to prevent starvation") {
+			val ctx = Ctx.withThreadPool(bufLen = 50); import ctx._
 
-			awaitAll(List.fill(201)(ex.enqueue(inc(sleep=1))))
+			awaitAll(List.fill(250)(ex.enqueue(inc(sleep=1))))
 			assert(queuedRunLoops.length == 2)
-			assert(count.current == 201)
+			assert(count.current == 250)
 		}
 	}
 

@@ -15,9 +15,9 @@ class RingSpec extends FunSpec {
 	val maxIndex = 19
 	val validIndices = (minIndex to maxIndex).toList
 	val validSizes = (minIndex to size).toList
-	def emptyState(idx: Int = 0) = (idx, idx, 0)
-	def fullState(idx: Int = 0) = (idx, idx, 0)
-	def withItems(idx: Int, n: Int) = (idx, ring.add(idx, n), 0)
+	def emptyState(idx: Int = 0) = Ring.make(idx, idx, 0)
+	def fullState(idx: Int = 0) = Ring.make(idx, idx, 0)
+	def withItems(idx: Int, n: Int) = Ring.make(idx, ring.add(idx, n), 0)
 
 	// we're only testing pure functions on ring, so we can reuse an instance
 	val ring = new Ring(size)

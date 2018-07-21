@@ -3,6 +3,7 @@ package net.gfxmonk.sequentialstate.internal
 import scala.util.Sorting
 import scala.collection.mutable
 import scala.language.experimental.macros
+import scala.annotation.tailrec
 
 // efficient in-memory threadsafe log collection, used
 // for debugging issues (SequentialExecutor is augmented
@@ -71,8 +72,15 @@ object Log {
 
 	def dump(n: Int) {
 		ifEnabled {
-			// XXX this is racey... just continue until it works?
-			while(true) {
+			dumpTo(n, lines => println(lines.mkString("\n")))
+		}
+	}
+
+	def dumpTo(n: Int, printer: Function[Seq[String],Unit]) {
+		ifEnabled {
+			// XXX this is racey... just retry until it works?
+			@tailrec
+			def extractLogs(): List[String] = {
 				try {
 					threads.synchronized {
 						val buffers = threads.map { case (tid,logs) =>
@@ -88,15 +96,21 @@ object Log {
 								}
 							})
 						}
-						println(merged.reverse.take(n).reverse.map { case (time,(tid, msg)) =>
+						merged.reverse.take(n).reverse.toList.map { case (tid,(time, msg)) =>
 							s"-- $time|$tid: $msg"
-						}.mkString("\n"))
+						}
 					}
-					return
 				} catch {
-					case _:Throwable => ()
+					case e:Exception => {
+						printer(Seq(s"*** Error extracting logs: $e; trying again"))
+						return extractLogs()
+					}
 				}
 			}
+
+			val logs = extractLogs()
+			val header = s"== Printing up to $n log lines =="
+			printer(header :: logs)
 		}
 	}
 

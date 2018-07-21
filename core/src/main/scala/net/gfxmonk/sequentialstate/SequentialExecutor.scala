@@ -5,7 +5,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import scala.annotation.tailrec
 import net.gfxmonk.sequentialstate.internal.Log
 
-import monix.execution.atomic.{Atomic,AtomicAny,AtomicInt}
+import monix.execution.atomic._
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -84,40 +84,61 @@ import scala.concurrent.{ExecutionContext, Future}
 
 class RingItem[T>:Null<:AnyRef] {
 	@volatile private var contents:T = null
-	def set(item:T) { contents = item }
-	def get: T = contents
+	def set(item:T) {
+		contents = item
+	}
+
+	def get: T = {
+		contents
+	}
 }
 
 object Ring {
+	type Count = Int
 	type Idx = Int
-	type HeadIdx = Int
-	type TailIdx = Int
-	type QueueSize = Int
-	type PromiseCount = Int
 
 	// TODO: state could be more efficiently stored as a packed (4,4,8) Long,
 	// as long as I can figure out signed operations. We'll keep this
 	// commented-out because it's much easier to debug
-	type State = (HeadIdx, TailIdx, QueueSize)
-	def make(head: HeadIdx, tail: TailIdx, numQueued: QueueSize) = {
+	// ------------------------------------------------
+	// # Simple implementation, for debugging
+	type State = (Int, Int, Int)
+	type AtomicState = AtomicAny[State]
+	def make(head: Idx, tail: Idx, numQueued: Count) = {
 		(head, tail, numQueued)
 	}
-	def headIndex(t:State) = t._1
-	def tailIndex(t:State) = t._2
-	def numQueued(t:State) = t._3
-
+	def headIndex(t:State):Idx = t._1
+	def tailIndex(t:State):Idx = t._2
+	def numQueued(t:State):Count = t._3
+	// ------------------------------------------------
+	// // # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
+	// type State = Long
+	// type AtomicState = AtomicLong
+	// // TODO: provide specialization for e.g. `setHead`, `setTail` etc instead of decoding and re-encoding each component.
+	// private val HEAD_OFFSET = 32
+	// private val TAIL_OFFSET = 16
+	// private val IDX_MASK = 0xffff
+	// private val QUEUED_MASK = 0xffffffff
+	// def make(head: Idx, tail: Idx, numQueued: Count) = {
+	// 	(head.toLong << HEAD_OFFSET) & (tail.toLong << TAIL_OFFSET) & (numQueued)
+	// }
+	// def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
+	// def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
+	// def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
+	// ------------------------------------------------
+	
 	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
 	// I don't trust unsigned maths, so subtract one bit for safety :shrug:
 	val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
 	val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
 
-	def queueSpaceExhausted(t: State) = numQueued(t) == MAX_QUEUED
-	def incrementQueued(t:State) = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
+	def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
+	def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
 
 	// if there's no work, we are (or should be) stopped
-	def isStopped(t:State) = tailIndex(t) == headIndex(t)
-	def incrementRunningFutures(i:PromiseCount) = i+1
-	def decrementRunningFutures(i:PromiseCount) = i-1
+	def isStopped(t:State): Boolean = tailIndex(t) == headIndex(t)
+	def incrementRunningFutures(i:Count): Count = i+1
+	def decrementRunningFutures(i:Count): Count = i-1
 }
 
 class Ring[T >: Null <: AnyRef](size: Int) {
@@ -133,8 +154,8 @@ class Ring[T >: Null <: AnyRef](size: Int) {
 	private var arr = Array.fill(size)(new RingItem[T])
 
 	// RING
-	def mask(idx: Idx) = (idx % size)
-	def at(idx: Idx) = arr(mask(idx)) // unsafe woo
+	def mask(idx: Idx): Idx = (idx % size)
+	def at(idx: Idx): RingItem[T] = arr(mask(idx)) // unsafe woo
 	def add(i: Idx, n: Int) = {
 		// assumes `n` is never greater than `size`
 		val result = i + n
@@ -189,7 +210,7 @@ object SequentialExecutor {
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val ring = new Ring[EnqueueableTask](bufLen)
 	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
-	private val stateRef:AtomicAny[Ring.State] = Atomic((0,0,0))
+	private val stateRef:Ring.AtomicState = Atomic(Ring.make(0,0,0))
 	private val numFuturesRef:AtomicInt = Atomic(0)
 
 	import Log.log
@@ -228,10 +249,11 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				// also run this from the executor)
 				queued = queue.poll()
 			}
-			log(s"dequeued item $queued")
+			log(s"dequeued item for index $idx")
 			ring.at(idx).set(queued)
 			queued.enqueuedAsync()
 			idx = ring.inc(dest)
+			n = n - 1
 		}
 		return idx
 	}
@@ -317,7 +339,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			}
 			val nextState = Ring.incrementQueued(state)
 			if (stateRef.compareAndSet(state, nextState)) {
-				log(s"putting item in queue ($state)")
+				log(s"putting item in queue ($nextState)")
 				queue.add(work)
 				if (Ring.isStopped(nextState)) {
 					// We've just added a queued item to a stopped state.
@@ -337,35 +359,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 	val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
-			Log("begin")
+			val logId = Log.scope("WorkLoop.run")
+			log("begin")
 			loop(200)
 		}
 
-		def advanceHeadTo(state: State, head: Idx, minimumReclaimedSpaces: Int): Option[State] = {
-			// TODO: don't use option?
-
-			// we can't just dequeue as many items as we're advancing head by, since
-			// some of them may be "taken" by outstanding futures.
-			val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get) + minimumReclaimedSpaces
-			val numQueued = Ring.numQueued(state)
-			val numDequeue = Math.min(spaceAvailable, numQueued)
-			val tail = Ring.tailIndex(state)
-			val newTail = if (numDequeue != 0) ring.add(tail, numDequeue) else tail
-			val newState = (head, newTail, numQueued - numDequeue)
-			if (stateRef.compareAndSet(state, newState)) {
-				if (numDequeue > 0) {
-					dequeueItemsInto(Ring.tailIndex(state), numDequeue)
-				}
-				Some(newState)
-			} else {
-				None
-			}
-		}
-
-
 		@tailrec
 		private def loop(_maxItems: Int): Unit = {
-			if (_maxItems < 0) return ec.execute(workLoop)
+			if (_maxItems <= 0) return ec.execute(workLoop)
 
 			val logId = Log.scope("WorkLoop.loop")
 			var state = stateRef.get
@@ -386,6 +387,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				log(s"executing item @ $currentHead")
 				val slot = ring.at(currentHead)
 				var item = slot.get
+
 				while(item == null) {
 					// spin waiting for item to be set
 					item = slot.get
@@ -428,6 +430,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 				}
 
+				slot.set(null) // must be nulled before advancing
 				currentHead = ring.inc(currentHead)
 
 				// try updating state, but don't worry if it fails
@@ -438,7 +441,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 					case None => stateRef.get
 				}
-				slot.set(null) // aid GC; if we keep this we could remove `readyIndex`
+
+				maxItems -= 1
 			}
 
 			// make sure we've definitely updated head:
@@ -457,6 +461,27 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			} else {
 				// there's more work coming, just continue
 				return loop(maxItems)
+			}
+		}
+
+		def advanceHeadTo(state: State, head: Idx, minimumReclaimedSpaces: Int): Option[State] = {
+			// TODO: don't use option?
+
+			// we can't just dequeue as many items as we're advancing head by, since
+			// some of them may be "taken" by outstanding futures.
+			val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get) + minimumReclaimedSpaces
+			val numQueued = Ring.numQueued(state)
+			val numDequeue = Math.min(spaceAvailable, numQueued)
+			val tail = Ring.tailIndex(state)
+			val newTail = if (numDequeue != 0) ring.add(tail, numDequeue) else tail
+			val newState = Ring.make(head, newTail, numQueued - numDequeue)
+			if (stateRef.compareAndSet(state, newState)) {
+				if (numDequeue > 0) {
+					dequeueItemsInto(Ring.tailIndex(state), numDequeue)
+				}
+				Some(newState)
+			} else {
+				None
 			}
 		}
 	}

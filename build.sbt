@@ -32,25 +32,29 @@ lazy val log = (project in file("log")).settings(
   name := "sequentialstate-log"
 )
 
+lazy val logEnabled = true
+
+lazy val logDependency: sbt.ClasspathDependency = if (logEnabled) log else (log % "compile-internal")
+
 lazy val core = (project in file("core")).settings(
   commonSettings,
   libraryDependencies += scalaReflect,
   name := "sequentialstate"
-).dependsOn(log % "compile-internal")
+).dependsOn(logDependency)
 
 lazy val perf = (project in file("perf")).settings(
   hiddenProject,
   libraryDependencies += "io.monix" %% "monix" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-perf"
-).dependsOn(core).dependsOn(log % "compile-internal")
+).dependsOn(core).dependsOn(logDependency)
 
 lazy val examples = (project in file("examples")).settings(
   hiddenProject,
   libraryDependencies += "io.monix" %% "monix-eval" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-examples"
-).dependsOn(core).dependsOn(log % "compile-internal")
+).dependsOn(core) // .dependsOn(logDependency)
 
 
 publishMavenStyle := true

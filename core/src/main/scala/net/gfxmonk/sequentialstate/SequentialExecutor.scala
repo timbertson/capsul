@@ -198,11 +198,10 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	private def dequeueItemsInto(dest: Idx, numItems: Int): Idx = {
-		val logId = Log.scope("dequeueItemsInto")
+		val logId = Log.scope(s"dequeueItemsInto($dest, $numItems)")
 		var idx = dest
 		var n = numItems
 		while(n > 0) {
-			// XXX can we wait for all `n` at once? Iterator?
 			var queued = queue.poll()
 			while (queued == null) {
 				// spinloop, since reserved (but un-populated) slots
@@ -213,8 +212,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			log(s"dequeued item for index $idx")
 			ring.at(idx).set(queued)
 			queued.enqueuedAsync()
-			idx = ring.inc(dest)
-			n = n - 1
+			idx = ring.inc(idx)
+			n -= 1
 		}
 		return idx
 	}
@@ -276,6 +275,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				val prevTail = Ring.tailIndex(state)
 				val nextIdx = dequeueItemsInto(prevTail, numDequeue)
 				if (numWork != 0) {
+					log(s"inserting work into $nextIdx")
 					ring.at(nextIdx).set(work)
 					// setReady(prevTail, nextIdx)
 					startIfEmpty(state)

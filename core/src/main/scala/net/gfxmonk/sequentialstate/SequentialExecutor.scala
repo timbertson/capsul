@@ -12,71 +12,25 @@ import scala.concurrent.{ExecutionContext, Future}
 /*
  * Topography / terminology
  *
- * Head is the earliest piece of work added, and the
- * next piece of work which will be executed.
- * Tail is the firs free slot. If equal to head, the queue is empty.
- * If equal to (head-1), the queue is full. This means we have a spare
- * slot to distinguish empty from full.
- * Ready is the same as `tail`, but is updated after the tail
- * item has been set. If `ready` is != `tail`, then the slots in tail
- * have been reserved but are not yet guaranteed to be populated.
+ * RingBuffer is based on https://www.snellman.net/blog/archive/2016-12-13-ring-buffers/
+ * (except that we overflow at 2*size, rather than relying on size being a power of 2)
  *
- * Note that `ready` points one after the final ready item, for consistency with `tail`.
- *
- * Examples:
- *
- * Key:
- *  [x.]: work item
- *  [?.]: undetermied (may or may not be set
- *  [0.]: unset / garbage (should not access)
- *  [>.]: (possibly) incomplete future
- *
- *  [.h]: head (index)
- *  [.H]: head (index + runningFutures)
- *  [.R]: ready index
- *  [.T]: tail
- *
- * For a ring of 8, we have 9 slots:
- * [0,1,2,3,4,5,6,7,8]
- *
- * empty:
- * [0. 0hH 0RT 0. 0. ] (ready = tail = (head+1))
- *
- * full of work (but some not yet ready):
- * [x. ?R ?. 0T xhH x. ] (first available work = Head, last available work = ready-1)
- *
- * full of work (all ready)
- * [x. x. x. 0RT xhH x. ] (first available work = Head, last available work = ready-1)
- *
- * full, three incomplete futures
- * [x. 0RT >h >. >. xH ] (
- *
- *
+ * If head == tail, the queue is empty
+ * If (head + size) % (2*size) == tail, the queue is full
+ * (these wrap to the same index mod `size`, but are on different sides / folds)
  *
  *
  * OK new plan:
- * numFuturesStarted: volatile (only ever incremented by run thread)
- * numFuturesCompleted: Atomic[Int] (decremented by any completed future)
- * ^ Note: if we're happy to eat the serialization, we could make this volatile but only submit such events to a single-threaded pool
- * ^ both above wrap around at a certain value (2^^32), we know they can't get more than BUFLEN apart. numFuturesStarted should always be >= numFuturesCompleted,
- *   so if it's the other way around we have to add 2^^32 to it until numFuturesCompleted wraps around
- *
+ * numFutures: Atomic[Int] (could do separate numFuturesStarted and numFuturesStopped, but have to take care of wraparound)
  * state: (head|tail|numQueued)
- *   - head & tail are both stored mod (bufsize*2). If head == tail then it's empy, but if (head + bufsize % twobuf) == tail then it's full
- *     (TODO: maybe another slot of memory is cheaper? Let's leave it for the initial impl). These can both have 2 bytes, numQueued would get 6 if it really wants it
- *     (TODO: block if numQueued wraps?)
- *
- * we also have `ready`, which is just volatile. It only gets incremented by the thread who reserved `tail`, so no need for CAS
  *
  * Option: also `headAdvisory`, which is updated every N items during a work batch. Saves us from doing an expensive CAS, and
  * quers are free to take it into account (and even pop it in HEAD for us). Have to be careful to check it doesn't get misleading
  * if it's not updated for a while. I think it should never lag behind by more than bufsize + N. But don't bother implementing
  * until later.
  *
- * To see if there's physically space available, compare head & tail. If there's space but it appears to be taken by (numFuturesStarted - numFuturesCompleted), don't enqueue.
- * This loop might be expensive, as it's 2 volatile reads and one CAS. Alternative is to bundle in numFutures into this state too,
- * but that gets contentious. Also we could only actually update the futures every `n` attempts (4?). Another alternative is just a single CAS counter,
- * then there's contention after spawning a future and when it completes.
+ * To see if there's physically space available, compare head & tail. If there's space but it appears to be taken by numFutures, don't enqueue.
+ * If we're running a loop of many futures, we could delay the future bookeeping until every `n` items.
  *
  * We can get away with not tying numFutures into state, because it's advisory. If we run ahead / behind a little bit, it doesn't matter because
  * it doesn't affect correctness.
@@ -97,48 +51,55 @@ object Ring {
 	type Count = Int
 	type Idx = Int
 
-	// TODO: state could be more efficiently stored as a packed (4,4,8) Long,
-	// as long as I can figure out signed operations. We'll keep this
-	// commented-out because it's much easier to debug
-	// ------------------------------------------------
-	// # Simple implementation, for debugging
-	type State = (Int, Int, Int)
-	type AtomicState = AtomicAny[State]
-	def make(head: Idx, tail: Idx, numQueued: Count) = {
-		(head, tail, numQueued)
-	}
-	def headIndex(t:State):Idx = t._1
-	def tailIndex(t:State):Idx = t._2
-	def numQueued(t:State):Count = t._3
-	// ------------------------------------------------
-	// // # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
-	// type State = Long
-	// type AtomicState = AtomicLong
-	// // TODO: provide specialization for e.g. `setHead`, `setTail` etc instead of decoding and re-encoding each component.
-	// private val HEAD_OFFSET = 32
-	// private val TAIL_OFFSET = 16
-	// private val IDX_MASK = 0xffff
-	// private val QUEUED_MASK = 0xffffffff
-	// def make(head: Idx, tail: Idx, numQueued: Count) = {
-	// 	(head.toLong << HEAD_OFFSET) & (tail.toLong << TAIL_OFFSET) & (numQueued)
-	// }
-	// def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
-	// def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
-	// def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
-	// ------------------------------------------------
-	
 	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
 	// I don't trust unsigned maths, so subtract one bit for safety :shrug:
 	val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
 	val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
-
 	def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
-	def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
 
 	// if there's no work, we are (or should be) stopped
 	def isStopped(t:State): Boolean = tailIndex(t) == headIndex(t)
-	def incrementRunningFutures(i:Count): Count = i+1
-	def decrementRunningFutures(i:Count): Count = i-1
+
+	// just for testing / debugging
+	def repr(t:State) = {
+		(headIndex(t), tailIndex(t), numQueued(t))
+	}
+
+
+
+
+
+
+
+	// ------------------------------------------------
+	// // # Simple implementation, for debugging
+	// type State = (Int, Int, Int)
+	// type AtomicState = AtomicAny[State]
+	// def make(head: Idx, tail: Idx, numQueued: Count) = {
+	// 	(head, tail, numQueued)
+	// }
+	// def headIndex(t:State):Idx = t._1
+	// def tailIndex(t:State):Idx = t._2
+	// def numQueued(t:State):Count = t._3
+	// def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
+	// ------------------------------------------------
+	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
+	type State = Long
+	type AtomicState = AtomicLong
+	// TODO: provide specialization for e.g. `setHead`, `setTail` etc instead of decoding and re-encoding each component.
+	private val HEAD_OFFSET = 48 // 64 - 16
+	private val TAIL_OFFSET = 32
+	private val IDX_MASK = 0xffff // 2 bytes (16 bits)
+	private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
+	def make(head: Idx, tail: Idx, numQueued: Count) = {
+		(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
+	}
+	def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
+	def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
+	def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
+	def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
+	// ------------------------------------------------
+
 }
 
 class Ring[T >: Null <: AnyRef](size: Int) {
@@ -272,7 +233,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)
 			if (spaceAvailable > 0) {
 				// try inserting at `tail`
-				log(s"space may be available ($state)")
+				log(s"space may be available (${Ring.repr(state)})")
 				val numQueued = Ring.numQueued(state)
 				val numDequeue = Math.min(spaceAvailable, numQueued)
 				val nextState = ring.dequeueAndReserve(state, numDequeue, 0)
@@ -305,7 +266,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)
 		if (spaceAvailable > 0) {
 			// try inserting at `tail`
-			log(s"space may be available ($state)")
+			log(s"space may be available (${Ring.repr(state)})")
 			val numQueued = Ring.numQueued(state)
 			val numDequeue = Math.min(spaceAvailable, numQueued)
 			val numWork = if (spaceAvailable > numDequeue) 1 else 0
@@ -339,7 +300,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			}
 			val nextState = Ring.incrementQueued(state)
 			if (stateRef.compareAndSet(state, nextState)) {
-				log(s"putting item in queue ($nextState)")
+				log(s"putting item in queue (${Ring.repr(nextState)})")
 				queue.add(work)
 				if (Ring.isStopped(nextState)) {
 					// We've just added a queued item to a stopped state.
@@ -381,7 +342,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// TODO should we yield or trampoline?
 			assert (!Ring.isStopped(state))
 
-			log(s"workLoop: $state, head = $currentHead, tail = $currentTail")
+			log(s"workLoop: ${Ring.repr(state)}, head = $currentHead, tail = $currentTail")
 			var fullyCompletedItems = 0
 			while (currentHead != currentTail) {
 				log(s"executing item @ $currentHead")
@@ -402,10 +363,10 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 					case Some(f) => {
 						log("ran async node")
-						numFuturesRef.transform(n => Ring.incrementRunningFutures(n))
+						numFuturesRef.increment()
 						// now that we've incremented running futures, set it up to decrement on completion
 						f.onComplete { _ =>
-							numFuturesRef.transform(n => Ring.decrementRunningFutures(n))
+							numFuturesRef.decrement()
 							// try to dequeue. If there's no space available then either someone
 							// beat us to it, or there was a temporary burst of >bufLen async items
 							dequeueIfSpace(stateRef.get)

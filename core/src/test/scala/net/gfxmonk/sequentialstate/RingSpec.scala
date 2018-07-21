@@ -35,6 +35,18 @@ class RingSpec extends FunSpec {
 		}
 	}
 
+	describe("make & repr") {
+		it("acts like a simple tuple") {
+			val examples = List(
+				(0,0,0),
+				(1,1,1),
+				(1,2,3)
+			)
+			examples.map { case (a,b,c) =>
+				assert(Ring.repr(Ring.make(a,b,c)) == (a,b,c))
+			}
+		}
+	}
 
 	describe("add") {
 		it("wraps around at 2*size") {
@@ -73,10 +85,7 @@ class RingSpec extends FunSpec {
 			validSizes.foreach { n =>
 				val state = withItems(i, n)
 				val result = ring.numItems(Ring.headIndex(state), Ring.tailIndex(state))
-				if(result != n) {
-					println(s"numItems: Failed: ring $state with size $n (expected $n, got $result)")
-				}
-				assert(result == n)
+				assert(result == n, s"- ring $state with size $n")
 			}
 		}
 	}
@@ -86,11 +95,7 @@ class RingSpec extends FunSpec {
 			validSizes.foreach { n =>
 				val state = withItems(i, n)
 				val result = ring.spaceAvailable(state, 0)
-				val expected = size - n
-				if(result != expected) {
-					println(s"spaceAvailable: Failed: ring $state with size $n (expected $expected, got $result)")
-				}
-				assert(result == expected)
+				assert(result == size - n, s"- ring $state with size $n")
 			}
 		}
 
@@ -115,6 +120,13 @@ class RingSpec extends FunSpec {
 		it("decrements queue by numQueue") {
 			assert(Ring.numQueued(state) == 5)
 			assert(Ring.numQueued(newState) == 2)
+		}
+	}
+
+	describe("incrementQueued") {
+		it("increments queued value") {
+			val state = Ring.make(1, 2, 3)
+			assert(Ring.incrementQueued(state) == Ring.make(1,2,4))
 		}
 	}
 

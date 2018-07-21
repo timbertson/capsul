@@ -103,7 +103,8 @@ object Ring {
 	def incrementQueued(t:State) = (headIndex(t), tailIndex(t), numQueued(t) + 1)
 	// def decrementQueued(t:Tail) = (tailIndex(t), numQueued(t) - 1)
 
-	// def incrementRunningFutures(t:Head) = (headIndex(t), numRunningFutures(t) + 1)
+	def incrementRunningFutures(i:PromiseCount) = i+1
+	def decrementRunningFutures(i:PromiseCount) = i-1
 	// def withHeadIndex(t:Head, i: Idx) = (i, numRunningFutures(t))
 
 	// if there's work, we are (or should be) running
@@ -147,18 +148,29 @@ class Ring[T >: Null <: AnyRef](size: Int) {
 		// XXX reuse `spaceBetween`
 		// queue is full when tail has wrapped around to one less than head
 		val diff = inc(headIndex(s), size) - tailIndex(s)
-		if (diff < 0) diff += size // there's never negative space available
+		if (diff < 0) diff = diff + size // there's never negative space available
+
+		// numFuturesRef is not synchronized with the rest of state; it may be inaccurate
+		if (diff > 0) diff = Math.min(diff - numFuturesRef.get)
 		return diff
 	}
 
 	def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int) = {
-		// dequeue & reserve up to maxDequeue queue slots
+		// dequeue up to numDequeue & reserve up to (numDequeue + numWork) ring slots
 		val head = headIndex(t)
 		val tail = tailIndex(t)
 		(head, add(tail, numDequeue + numWork), queued - numDequeue)
 	}
+
+	// def advanceHeadTo(t: State, newHead: Idx): (Int, State) = {
+	// 	val spaceAvailable = this.spaceAvailable(t) + this.spaceBetween(Ring.headIndex(t), newHead)
+	// 	val numQueued = Ring.numQueued(t)
+	// 	val spaceUsed = Math.min(spaceAvailable, numQueued)
+	// 	val tail = Ring.tailIndex(t)
+	// 	val newTail = if (spaceUsed != 0) add(tail, spaceUsed) else tail
+	// 	(newHead, newTail, numQueued - spaceUsed)
+	// }
 	// def headActionableIndex(t:Head) = add(t._1, t._2)
-	// def decrementRunningFutures(t:Head) = (inc(headIndex(t)), numRunningFutures(t) - 1)
 	// def addToHeadIndex(t:Head, n: Int) = (add(headIndex(t), n), numRunningFutures(t))
 }
 
@@ -235,41 +247,70 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		return dest
 	}
 
-	private def insertWork(prev: State, item: EnqueueableTask): Boolean = {
-		val logId = Log.scope("Executor.insertWork")
-		val tailIndex = Ring.tailIndex(prev)
-		ring.at(tailIndex).set(queued)
-		setReady(tailIndex, isWorkLoop)
-		startIfEmpty(prev)
-	}
+	// private def insertWork(prev: State, item: EnqueueableTask): Boolean = {
+	// 	val logId = Log.scope("Executor.insertWork")
+	// 	val tailIndex = Ring.tailIndex(prev)
+	// 	ring.at(tailIndex).set(queued)
+	// 	setReady(tailIndex, isWorkLoop)
+	// 	startIfEmpty(prev)
+	// }
+  //
+	// 	// required: lastTail is reserved
+	// 	// returns: true if item was inserted, false if
+	// 	// item was interrupted by queued work
+	// 	val logId = Log.scope("Executor.insertWork")
+	// 	val tailIndex = Ring.tailIndex(lastTail)
+	// 	if (hasQueuedWork(lastTail)) {
+	// 		val queued = ring.queue.poll()
+	// 		log(s"dequeued item $queued")
+	// 		if (queued != null) {
+	// 			ring.at(tailIndex).set(queued)
+	// 			setReady(currentTail, isWorkLoop)
+	// 			ring.tailRef.transform(Ring.decrementQueued)
+	// 			log("decremented quqeued items")
+	// 			queued.enqueuedAsync()
+	// 			return false
+	// 		} // else someone already cleared out the queue
+	// 	}
+	// 	log(s"no queued items, inserting work")
+	// 	ring.at(tailIndex).set(item)
+	// 	setReady(currentTail, isWorkLoop)
+	// 	return true
+	// }
 
-		// required: lastTail is reserved
-		// returns: true if item was inserted, false if
-		// item was interrupted by queued work
-		val logId = Log.scope("Executor.insertWork")
-		val tailIndex = Ring.tailIndex(lastTail)
-		if (hasQueuedWork(lastTail)) {
-			val queued = ring.queue.poll()
-			log(s"dequeued item $queued")
-			if (queued != null) {
-				ring.at(tailIndex).set(queued)
-				setReady(currentTail, isWorkLoop)
-				ring.tailRef.transform(Ring.decrementQueued)
-				log("decremented quqeued items")
-				queued.enqueuedAsync()
-				return false
-			} // else someone already cleared out the queue
+	@tailrec
+	private def dequeueIfSpace(state: State): Int = {
+		val numQueued = Ring.numQueued(state)
+		if (numQueued > 0) {
+			val spaceAvailable = ring.spaceAvailable(state)
+			if (spaceAvailable > 0) {
+				// try inserting at `tail`
+				log(s"space may be available ($state)")
+				val numQueued = Ring.numQueued(state)
+				val numDequeue = Math.min(spaceAvailable, numQueued)
+				val nextState = ring.dequeueAndReserve(state, numDequeue, 0)
+				if (ring.stateRef.compareAndSet(state, nextState)) {
+					// We reserved all the slots we asked for,
+					// we need to set items then advance `ready` to our slot.
+					log(s"reserved ${numDequeue} dequeue slots from ${Ring.tailIndex(state)}")
+					val prevTail = Ring.tailIndex(state)
+					val nextIdx = dequeueItemsInto(prevTail, numDequeue)
+					setReady(ring.add(prevTail, numDequeue))
+					startIfEmpty(state)
+					return numDequeue
+				} else {
+					// couldn't reserve tail; retry
+					return dequeueIfSpace(ring.state.get)
+				}
+			}
+		} else {
+			return 0
 		}
-		log(s"no queued items, inserting work")
-		ring.at(tailIndex).set(item)
-		setReady(currentTail, isWorkLoop)
-		return true
 	}
 
 	@tailrec
 	private def doEnqueue(work: EnqueueableTask):Boolean = {
 		val logId = Log.scope("Executor.doEnqueue")
-		// val currentTail = ring.tailRef.get
 		// first things first, is there spare capacity?
 		val state - ring.stateRef.get
 		val spaceAvailable = ring.spaceAvailable(state)
@@ -309,6 +350,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				// pending promises? Whoever decrements promiseCount
 				// will have to check `state` afterwards
 				ring.queue.add(work)
+				if (!Ring.isRunning(nextState)) {
+					// We've just added a queued item to a stopped state.
+					// This can only mean that all slots are taken by futures
+					//
+					// To guard against futures completing and failing to enqueue
+					// further work, we ensure that there's _still_ no space
+					dequeueIfSpace(nextState)
+				}
 				return false
 			} else {
 				// CAS failed, try again
@@ -323,115 +372,177 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			loop(200)
 		}
 
+		def advanceHeadTo(state: State, head: Idx, minimumReclaimedSpaces: Int): Option[State] {
+			// TODO: don't use option?
+
+			// spaceAvailable() may return space which we _thought_ was in use by futures
+			// due to race conditions, so we can only reclaim the items we know were (synchronously) completed
+			val spaceAvailable = this.spaceAvailable(state) + minimumReclaimedSpaces
+			val numQueued = Ring.numQueued(state)
+			val numDequeue = Math.min(spaceAvailable, numQueued)
+			val tail = Ring.tailIndex(state)
+			val newTail = if (spaceUsed != 0) ring.add(tail, spaceUsed) else tail
+			val newState = (newHead, newTail, numQueued - spaceUsed)
+			if (ring.state.compareAndSet(state, newState)) {
+				if (numDequeue > 0) {
+					dequeueItemsInto(Ring.tailIndex(state), numDequeue)
+				}
+				Some(newState)
+			} else {
+				None
+			}
+		}
+
+
 		@tailrec
 		private def loop(_maxItems: Int): Unit = {
+			if (_maxItems < 0) return ec.execute(workLoop)
+
 			val logId = Log.scope("WorkLoop.run")
 			val state = ring.stateRef.get
-			val currentHead = 
+			var currentHead = Ring.headIndex(state)
 			var currentReady = ring.readyIndex
+			var maxItems = _maxItems
 
+			var unacknowledgedCompletions = 0
 			val readyItems = ring.spaceBetween(currentHead, currentReady)
 			if (readyItems > 0) {
+				// good, we've got work to do
+				log(s"workLoop: $state, readyItems = $readyItems")
+				var fullyCompletedItems = 0
+				while (readyItems > 0) {
+					log(s"executing item @ $index")
+					val slot = ring.at(currentHead)
+					val item = slot.get
 
-			} else {
-				val 
-			}
-			var index = ring.headActionableIndex(currentHead)
-			var readyIndex = Ring.readyIndex(currentReady)
+					item.get.run().filter(!_.isCompleted) match {
+						case None => {
+							log("ran sync node")
+							fullyCompletedItems = fullyCompletedItems + 1
+							// TODO: we don't have to acknowledge every sync item, we can do it in a batch to save CAS operations.
+							// But don't let HEAD lag behind reality more than `bufLen / 2`
+							// unacknowledgedCompletions += 1
+							// if (unacknowledgedCompletions >= bufLen / 2) {
+							// 	if(ring.headRef.compareAndSet(currentHead, Ring.withHeadIndex(currentHead, index))) {
+							// 		currentHead = ring.headRef.get
+							// 	} else {
+							// 		unacknowledgedCompletions = 0
+							// 	}
+							// }
+						}
+						case Some(f) => {
+							log("ran async node")
+							ring.numFutures.transform(Ring.incrementRunningFutures)
+							// now that we've incremented running futures, set it up to decrement on completion
+							f.onComplete { _ =>
+								var state = Ring.stateRef.get
+								var nextState = Ring.decrementRunningFutures(state)
+								while(!ring.stateRef.compareAndSet(state, nextState)) {
+									state = Ring.stateRef.get
+									nextState = Ring.decrementRunningFutures(state)
+								}
+								// try to dequeue. If there's no space available then either someone
+								// beat us to it, or there was a temporary burst of >bufLen async items
+								dequeueIfSpace(nextState)
 
-			var maxItems = _maxItems
-			var unacknowledgedCompletions = 0
-			log(s"workLoop: index = $index, readyIndex = $readyIndex")
-			while (index != readyIndex) {
-				log(s"executing item @ $index")
-				val item = ring.at(index)
-				index = ring.inc(index)
-				item.get.run().filter(!_.isCompleted) match {
-					case None => {
-						log("ran sync node")
-						// we don't have to acknowledge every sync item, we can do it in a batch to save CAS operations.
-						// But don't let HEAD lag behind reality more than `bufLen / 2`
-						unacknowledgedCompletions += 1
-						if (unacknowledgedCompletions >= bufLen / 2) {
-							if(ring.headRef.compareAndSet(currentHead, Ring.withHeadIndex(currentHead, index))) {
-								currentHead = ring.headRef.get
-							} else {
-								unacknowledgedCompletions = 0
+								// TODO: ensure workLoop is running, dequeue work?
+								// worst case:
+								//  - ring capacity is 1
+								//  - there is an incomplete future
+								//
+								// enqueue decides to inc queued from 0 -> 1
+								//
+								// future completes, decrements count by one
+								//
+								// if future checks state now, it's still empty (stopped)
+								//
+								// enqueue _succeeds_ setting new state (queued = 1)
+								//
+								// if enqueue checks futures now, it _would_ see that there's space available
+								// (there can't be more futures started in the meantime because
+								//
 							}
 						}
 					}
-					case Some(f) => {
-						log("ran async node")
-						// increment head's async counter
-						var nextHead = ring.addToHeadIndex(Ring.incrementRunningFutures(currentHead), unacknowledgedCompletions)
-						while (!ring.headRef.compareAndSet(currentHead, nextHead)) {
-							currentHead = ring.headRef.get
-							nextHead = ring.addToHeadIndex(Ring.incrementRunningFutures(currentHead), unacknowledgedCompletions)
+
+					currentHead = Ring.inc(currentHead)
+
+					// try updating state, but don't worry if it fails
+					state = advanceHeadTo(state, currentHead, fullyCompletedItems) match {
+						case Some(newState) => {
+							fullyCompletedItems = 0 // reset since these have been taken into account
+							newState
 						}
-						unacknowledgedCompletions = 0
-						// now that we've incremented running futures, set it up to decrement on completion
-						f.onComplete { _ =>
-							ring.headRef.transform(ring.decrementRunningFutures)
-							//TODO: ensure workLoop is running
-						}
+						case None => state = ring.state.get
+					}
+					readyItems = readyItems - 1
+					slot.set(null) // aid GC; if we keep this we could remove `readyIndex`
+				}
+
+				// make sure we've definitely updated head:
+				while (Ring.headIndex(state) != currentHead) {
+					state = advanceHeadTo(state, currentHead, fullyCompletedItems) match {
+						case Some(newState) => newState
+						case None => ring.state.get
 					}
 				}
-				maxItems = maxItems - 1
-			}
 
-			if (unacknowledgedCompletions > 0) {
-				log(s"incrementing HEAD idx by $unacknowledgedCompletions")
-				ring.headRef.transform(head => ring.addToHeadIndex(head, unacknowledgedCompletions))
-			}
-
-			if (shouldKeepRunningAfterBatch(currentHead)) {
-				if (maxItems <= 0) {
-					log("trampoline")
-					return ec.execute(workLoop)
+				// state _must_ have been set to the most recent post-CAS result,
+				// so we can now use it to determine whether to stop
+				if (!Ring.isRunning(state)) {
+					log("shutting down")
+					return
 				} else {
+					// there's more work coming, just continue
 					return loop(maxItems)
 				}
+			} else {
+				// there must be something pending. Only this loop updates head, and
+				// it terminates if head becomes empty
+				// TODO should we yield or trampoline?
+				log("trampolining because there are no ready items")
+				return ec.execute(workLoop)
 			}
 		}
 
-		@tailrec
-		private def shouldKeepRunningAfterBatch(currentHead: Head): Boolean = {
-			val logId = Log.scope("WorkLoop.shouldKeepRunningAfterBatch")
-			val currentReady = ring.readyRef.get
-			if (Ring.readyIndex(currentReady) == ring.headActionableIndex(currentHead)) {
-				// no more work. Is there queued work though?
-				val currentTail = ring.tailRef.get
-				if (hasQueuedWork(currentTail) && ring.spaceAvailable(currentHead, currentTail)) {
-					// try reserving a tail slot
-					val nextTail = ring.nextTail(currentTail)
-					if (ring.tailRef.compareAndSet(currentTail, nextTail)) {
-						log(s"attempting to dequeue work into slot $currentTail")
-						insertWork(currentTail, nextTail, UnitOfWork.noop, true)
-						return true // either we dequeued work, or we were beaten to it
-						// TODO is it possible for this to spin, if the thread which was decrementing
-						// the tail queue count is interrupted?
-					} else {
-						// couldn't reserve slot, retry
-						return shouldKeepRunningAfterBatch(currentHead)
-					}
-				} else {
-					// no queued work, or no space avilable
-					log(s"no queued work, or no space available")
-					if (ring.readyRef.compareAndSet(currentReady, setStopped(currentReady))) {
-						log("stopping")
-						return false
-					} else {
-						// `ready` changed, loop again
-						log("stop request failed, trying again")
-						return shouldKeepRunningAfterBatch(currentHead)
-					}
-				}
-			} else {
-				// ready is less than head, we've already got work to do
-				log("more work detected")
-				return true
-			}
-		}
+		// @tailrec
+		// private def shouldKeepRunningAfterBatch(currentHead: Head): Boolean = {
+		// 	val logId = Log.scope("WorkLoop.shouldKeepRunningAfterBatch")
+		// 	val currentReady = ring.readyRef.get
+		// 	if (Ring.readyIndex(currentReady) == ring.headActionableIndex(currentHead)) {
+		// 		// no more work. Is there queued work though?
+		// 		val currentTail = ring.tailRef.get
+		// 		if (hasQueuedWork(currentTail) && ring.spaceAvailable(currentHead, currentTail)) {
+		// 			// try reserving a tail slot
+		// 			val nextTail = ring.nextTail(currentTail)
+		// 			if (ring.tailRef.compareAndSet(currentTail, nextTail)) {
+		// 				log(s"attempting to dequeue work into slot $currentTail")
+		// 				insertWork(currentTail, nextTail, UnitOfWork.noop, true)
+		// 				return true // either we dequeued work, or we were beaten to it
+		// 				// TODO is it possible for this to spin, if the thread which was decrementing
+		// 				// the tail queue count is interrupted?
+		// 			} else {
+		// 				// couldn't reserve slot, retry
+		// 				return shouldKeepRunningAfterBatch(currentHead)
+		// 			}
+		// 		} else {
+		// 			// no queued work, or no space avilable
+		// 			log(s"no queued work, or no space available")
+		// 			if (ring.readyRef.compareAndSet(currentReady, setStopped(currentReady))) {
+		// 				log("stopping")
+		// 				return false
+		// 			} else {
+		// 				// `ready` changed, loop again
+		// 				log("stop request failed, trying again")
+		// 				return shouldKeepRunningAfterBatch(currentHead)
+		// 			}
+		// 		}
+		// 	} else {
+		// 		// ready is less than head, we've already got work to do
+		// 		log("more work detected")
+		// 		return true
+		// 	}
+		// }
 	}
 }
 

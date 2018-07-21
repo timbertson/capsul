@@ -118,7 +118,6 @@ object CounterState {
 		val counter = new CounterState()
 		def loop(i:Int): Future[Int] = {
 			val logId = Log.scope(s"runWithBackpressure($i)")
-			val start = System.currentTimeMillis()
 			if (i == 0) {
 				log("EOF")
 				counter.current
@@ -126,8 +125,6 @@ object CounterState {
 				val p = counter.inc()
 				log(s"inc: $i")
 				p.flatMap { case () => {
-					val time = System.currentTimeMillis() - start
-					log(s"complete: $i @ $time")
 					loop(i-1)
 				}}
 			}
@@ -473,9 +470,9 @@ object PerfTest {
 
 		val countLimit = 10000
 		repeat("counter", List(
-			"akka counter" -> (() => CounterActor.run(countLimit)),
 			"seq-unbounded counter" -> (() => CounterState.run(countLimit)),
-			"seq-backpressure counter" -> (() => CounterState.runWithBackpressure(countLimit))
+			"seq-backpressure counter" -> (() => CounterState.runWithBackpressure(countLimit)),
+			"akka counter" -> (() => CounterActor.run(countLimit))
 		))
 
 		// pipeline comparison:

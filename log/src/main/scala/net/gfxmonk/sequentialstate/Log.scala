@@ -17,8 +17,8 @@ private [sequentialstate] class LogCtx(id: String, val buf: Log.LogBuffer) {
 }
 
 object Log {
-	val ENABLE = true; type Ctx = LogCtx
-	// val ENABLE = false; type Ctx = Unit
+	// val ENABLE = true; type Ctx = LogCtx
+	val ENABLE = false; type Ctx = Unit
 
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)

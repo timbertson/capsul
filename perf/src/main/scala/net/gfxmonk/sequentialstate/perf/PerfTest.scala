@@ -14,7 +14,9 @@ import scala.concurrent.duration._
 import scala.concurrent._
 import scala.util._
 
-import akka.actor.{ActorSystem,Actor}
+import akka.pattern.ask
+import akka.util.Timeout
+import akka.actor.{ActorSystem,Actor,ActorRef}
 import akka.stream.{Materializer,ActorMaterializer}
 
 object Sleep {
@@ -47,15 +49,15 @@ object Stats {
 	}
 }
 
-class SampleWordCountState(implicit sched: ExecutionContext) {
-	val state = SequentialState(0)
+class SampleWordCountState(bufLen: Int)(implicit sched: ExecutionContext) {
+	val state = SequentialState(0, bufLen = bufLen)
 	def feed(line: String) = state.sendTransform(_ + line.split("\\w").length)
 	def reset() = state.sendSet(0)
 	def current = state.current
 }
 
-class SampleCountingState()(implicit ec: ExecutionContext) {
-	val state = SequentialState(v = 0)
+class SampleCountingState(bufLen: Int)(implicit ec: ExecutionContext) {
+	val state = SequentialState(v = 0, bufLen = bufLen)
 	def inc() = state.sendTransform(_ + 1)
 	def current = state.current
 }
@@ -68,7 +70,54 @@ class CounterActor extends Actor {
 	def receive = {
 		case Increment => i += 1
 		case Decrement => i -= 1
-		case ReturnCount(p) => p.success(i)
+		case GetCount => sender ! i
+	}
+}
+
+class CounterActorWithFeedback extends Actor {
+	import CounterActor._
+
+	var i = 0
+
+	def receive = {
+		case Increment => { i += 1; sender ! ()}
+		case Decrement => { i -= 1; sender ! ()}
+		case GetCount => sender ! i
+	}
+}
+
+object BackpressureActor {
+	case object WorkCompleted
+}
+
+class BackpressureActor(bufLen: Int, impl: ActorRef)(implicit timeout: Timeout) extends Actor {
+	import BackpressureActor._
+	private var numInProgress = 0
+	private var queue = mutable.Queue[(Any,ActorRef)]()
+
+	private def submitOperation(operation: Any, sender: ActorRef) {
+		implicit val ec: ExecutionContext = context.dispatcher
+		numInProgress += 1
+		val result = (impl ? operation)
+		sender ! result // work submitted, you can do more stuff now
+		result.onComplete(_ => self ! WorkCompleted)
+	}
+
+	def receive = {
+		case WorkCompleted => {
+			numInProgress -= 1
+			while (numInProgress < bufLen && queue.nonEmpty) {
+				val (operation, sender) = queue.dequeue()
+				submitOperation(operation, sender)
+			}
+		}
+		case operation => {
+			if (numInProgress == bufLen) {
+				queue.enqueue((operation, sender))
+			} else {
+				submitOperation(operation, sender)
+			}
+		}
 	}
 }
 
@@ -76,9 +125,9 @@ object CounterActor {
 	sealed trait Message
 	case object Increment extends Message
 	case object Decrement extends Message
-	case class ReturnCount(p: Promise[Int]) extends Message
+	case object GetCount extends Message
 
-	def run(n: Int)(implicit system: ActorSystem, ec: ExecutionContext): Future[Int] = {
+	def run(n: Int)(implicit system: ActorSystem, ec: ExecutionContext, timeout: Timeout): Future[Int] = {
 		import akka.actor.Props
 		val counter = system.actorOf(Props[CounterActor])
 		var limit = n
@@ -86,14 +135,29 @@ object CounterActor {
 			counter ! Increment
 			limit -= 1
 		}
-		val result = Promise[Int]()
-		counter ! ReturnCount(result)
-		result.future
+		(counter ? GetCount).mapTo[Int]
+	}
+
+	def runWithBackpressure(n: Int, bufLen: Int)(implicit system: ActorSystem, ec: ExecutionContext, timeout: Timeout): Future[Int] = {
+		import akka.actor.Props
+		val counterImpl = system.actorOf(Props[CounterActorWithFeedback])
+		val actor = system.actorOf(Props(new BackpressureActor(bufLen, counterImpl)))
+		def loop(i:Int): Future[Int] = {
+			if (i == 0) {
+				(actor ? GetCount).mapTo[Future[Int]].flatMap(identity)
+			} else {
+				(actor ? Increment).mapTo[Future[Unit]].flatMap { case _: Future[Unit] =>
+					// work submitted; continue!
+					loop(i-1)
+				}
+			}
+		}
+		loop(n)
 	}
 }
 
-class CounterState()(implicit ec: ExecutionContext) {
-	private val state = SequentialState(0)
+class CounterState(bufLen: Int)(implicit ec: ExecutionContext) {
+	private val state = SequentialState(0, bufLen = bufLen)
 	def inc() = state.sendTransform { current =>
 		Log(s"incrementing $current -> ${current+1}")
 		current+1
@@ -103,8 +167,8 @@ class CounterState()(implicit ec: ExecutionContext) {
 }
 
 object CounterState {
-	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
-		val counter = new CounterState()
+	def run(n: Int, bufLen: Int)(implicit ec: ExecutionContext): Future[Int] = {
+		val counter = new CounterState(bufLen)
 		var limit = n
 		while(limit > 0) {
 			counter.inc()
@@ -113,9 +177,9 @@ object CounterState {
 		counter.current
 	}
 
-	def runWithBackpressure(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
+	def runWithBackpressure(n: Int, bufLen: Int)(implicit ec: ExecutionContext): Future[Int] = {
 		import Log.log
-		val counter = new CounterState()
+		val counter = new CounterState(bufLen)
 		def loop(i:Int): Future[Int] = {
 			val logId = Log.scope(s"runWithBackpressure($i)")
 			if (i == 0) {
@@ -140,7 +204,7 @@ class PipelineStage[T,R](
 	handleCompleted: Function[List[Try[R]], Future[_]]
 )(implicit ec: ExecutionContext) {
 	import Log.log
-	val state = SequentialState(v = new State())
+	val state = SequentialState(v = new State(), bufLen = bufLen)
 	val logId = Log.scope(s"PipelineStage")
 
 	class State {
@@ -207,12 +271,12 @@ class PipelineStage[T,R](
 case class PipelineConfig(stages: Int, len: Int, bufLen: Int, parallelism: Int, timePerStep: Float, jitter: Float)
 object Pipeline {
 	import Log.log
-	def run(conf: PipelineConfig)(implicit ec: ExecutionContext): Future[Int] = {
+	def runSeq(conf: PipelineConfig)(implicit ec: ExecutionContext): Future[Int] = {
 		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
 		val workEc = ExecutionContext.fromExecutor(threadPool)
 
 		val source = Iterable.range(0, conf.len).toIterator
-		val sink = SequentialState(0)
+		val sink = SequentialState(0, bufLen = conf.bufLen)
 		val drained = Promise[Int]()
 		val logId = Log.scope("Pipeline")
 		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
@@ -367,6 +431,7 @@ object Pipeline {
 }
 
 object PerfTest {
+	val bufLen = 50
 	def makeThreadPool(parallelism: Int) = {
 		// Executors.newFixedThreadPool(parallelism)
 		new ForkJoinPool(parallelism)
@@ -380,7 +445,7 @@ object PerfTest {
 	}.take(n)
 
 	def simpleCounter(limit: Int): Future[Int] = {
-		val lineCount = new SampleCountingState()
+		val lineCount = new SampleCountingState(bufLen)
 		def loop(i: Int): Future[Int] = {
 			lineCount.inc().flatMap { _: Unit =>
 				val nextI = i+1
@@ -395,8 +460,8 @@ object PerfTest {
 	}
 
 	def countWithSequentialStates(lines: Iterator[String]): Future[(Int,Int)] = {
-		val wordCounter = new SampleWordCountState()
-		val lineCount = new SampleCountingState()
+		val wordCounter = new SampleWordCountState(bufLen)
+		val lineCount = new SampleCountingState(bufLen)
 		def loop(): Future[(Int, Int)] = {
 			if (lines.hasNext) {
 				for {
@@ -420,7 +485,7 @@ object PerfTest {
 		val start = System.currentTimeMillis()
 		val f = impl
 		val result = Try {
-			Await.result(f(), Duration(6, TimeUnit.SECONDS))
+			Await.result(f(), Duration(1, TimeUnit.SECONDS))
 			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {
@@ -462,17 +527,22 @@ object PerfTest {
 
 	def main(): Unit = {
 		val repeat = this.repeat(20) _
-		val bufLen = 10
 
 		import akka.actor.ActorSystem
 		implicit val actorSystem = ActorSystem("akka-example", defaultExecutionContext=Some(ec))
 		implicit val akkaMaterializer = ActorMaterializer()
 
+		// so yuck! Note that each actor's context has a receiveTimeout
+		// but it might be infinite, so we can't use it?
+		implicit val timeout: Timeout = Timeout(1.minute)
+
+
 		val countLimit = 10000
 		repeat("counter", List(
-			"seq-unbounded counter" -> (() => CounterState.run(countLimit)),
-			"seq-backpressure counter" -> (() => CounterState.runWithBackpressure(countLimit)),
-			"akka counter" -> (() => CounterActor.run(countLimit))
+			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
+			"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
+			"Akka counter" -> (() => CounterActor.run(countLimit)),
+			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
 		))
 
 		// pipeline comparison:
@@ -489,9 +559,9 @@ object PerfTest {
 
 		def runPipelineComparison(desc: String, conf: PipelineConfig) = {
 			repeat(s"$desc pipeline ($conf)", List(
-				s"* SequentialState" -> (() => Pipeline.run(conf)),
-				s"Akka" -> (() => Pipeline.runAkka(conf))
-				// s"Monix" -> (() => Pipeline.runMonix(conf)(monixScheduler))
+				s"* SequentialState" -> (() => Pipeline.runSeq(conf)),
+				s"Akka" -> (() => Pipeline.runAkka(conf)),
+				s"Monix" -> (() => Pipeline.runMonix(conf)(monixScheduler))
 			))
 		}
 
@@ -515,7 +585,7 @@ object LongLivedLoop {
 	def main(): Unit = {
 		val threadPool = PerfTest.makeThreadPool(4)
 		implicit val ec = ExecutionContext.fromExecutor(threadPool)
-		Await.result(CounterState.run(Int.MaxValue), Duration.Inf)
+		Await.result(CounterState.run(Int.MaxValue, bufLen = PerfTest.bufLen), Duration.Inf)
 	}
 }
 

@@ -198,73 +198,138 @@ object CounterState {
 }
 
 
+object PipelineStage {
+	var nextId = 0
+}
+
 class PipelineStage[T,R](
 	bufLen: Int,
 	process: Function[T,Future[R]],
-	handleCompleted: Function[List[R], Future[_]]
+	handleCompleted: Function[R, Future[Unit]]
 )(implicit ec: ExecutionContext) {
 	import Log.log
-	val state = SequentialState(v = new State(), bufLen = bufLen)
-	val logId = Log.scope(s"PipelineStage")
+	val stateRef = SequentialState(v = new State(), bufLen = bufLen)
+	val logId = Log.scope(s"PipelineStage-${PipelineStage.nextId}")
+	PipelineStage.nextId += 1
 
 	class State {
-		val queue = new mutable.Queue[Future[R]]()
-		var outgoing: Option[Future[_]] = None
+		var queue = Queue[Future[R]]()
+		var head: Future[Unit] = Future.successful(())
 	}
 
-	private def _drainCompleted(state: State): Unit = {
-		// called any time a future completes, either an item in `queue` or `outgoing`
-		if (state.outgoing.isDefined) {
-			log(s"drainCompleted: outgoing already defined")
-			return
-		}
+	// private def _drainCompleted(state: State): Unit = {
+	// 	// called any time a future completes, either an item in `queue` or `outgoing`
+	// 	if (state.outgoing.isDefined) {
+	// 		log(s"drainCompleted: outgoing is defined, awaiting completion")
+	// 		return
+	// 	}
+  //
+	// 	// pop off completed items, but only in order (i.e. stop at the first incomplete item)
+	// 	val ret = new mutable.ListBuffer[R]()
+	// 	while(true) {
+	// 		state.queue.headOption match {
+	// 			case Some(f) if f.isCompleted => {
+	// 				ret.append(f.value.get.get)
+	// 				state.queue.dequeue()
+	// 			}
+	// 			case _ => {
+	// 				log(s"drainCompleted: popping $ret")
+	// 				if (ret.nonEmpty) {
+	// 					// we have some items to produce
+	// 					val fut = handleCompleted(ret.toList)
+	// 					log(s"state.outgoing = Some($fut)")
+	// 					state.outgoing = Some(fut)
+	// 					fut.onComplete(_ => this.state.access { state =>
+	// 						log(s"state.outgoing = None")
+	// 						state.outgoing = None
+	// 						// set up another drain when this outgoing batch is done
+	// 						_drainCompleted(state)
+	// 					})
+	// 				}
+	// 				return
+	// 			}
+	// 		}
+	// 	}
+	// }
+  //
+	// private def drainCompleted():Future[Unit] = state.sendAccess(_drainCompleted)
 
-		// pop off completed items, but only in order (i.e. stop at the first incomplete item)
-		val ret = new mutable.ListBuffer[R]()
-		while(true) {
-			state.queue.headOption match {
-				case Some(f) if f.isCompleted => {
-					ret.append(f.value.get.get)
-					state.queue.dequeue()
-				}
-				case _ => {
-					log(s"drainCompleted: popping $ret")
-					if (ret.nonEmpty) {
-						// we have some items to produce
-						val fut = handleCompleted(ret.toList)
-						log(s"state.outgoing = Some($fut)")
-						state.outgoing = Some(fut)
-						fut.onComplete(_ => this.state.access { state =>
-							log(s"state.outgoing = None")
-							state.outgoing = None
-							// set up another drain when this outgoing batch is done
-							_drainCompleted(state)
-						})
+	def handleCompletedHead(item: R): Future[Unit] = {
+		// need to re-access state
+		log(s"item processed: ${item}, accessing state to emit downstream events")
+		stateRef.accessAsync { state =>
+			val (readyItems, newQueue) = state.queue.span(_.isCompleted)
+			if (readyItems.isEmpty) {
+				return Future.successful(())
+			}
+
+			log(s"Emitting events downstream: ${readyItems}")
+			val batchPushed = readyItems.foldLeft(Future.successful(())) { (acc, item) =>
+				acc.flatMap { case () =>
+					item.flatMap { item =>
+						handleCompleted(item)
 					}
-					return
 				}
 			}
+			state.queue = newQueue
+			// newQueue.headOption.foreach { head =>
+			// 	state.busy = head.onComplete(handleCompletedHead)
+			// }
+			batchPushed
+
+			// // push out a chain of all currently-completed items
+			// val firstItemDone = handleCompleted(item)
+			// state.queue.dequeue()
+			// val batchHandled = state.queue.foldLeft(firstItemDone) { (acc, item) =>
+			// 	acc.flatMap { case () =>
+			// 		item.flatMap { item =>
+			// 			handleCompleted(item)
+			// 		}
+			// 	}
+			// }
+			// state.queue.clear()
+			// batchHandled
 		}
 	}
-
-	private def drainCompleted():Future[Unit] = state.sendAccess(_drainCompleted)
 
 	def enqueue(item: T):Future[Unit] = {
-		state.access { state =>
-			_drainCompleted(state)
+		log(s"enqueueing ${item}")
+		stateRef.sendAccessAsync { state =>
+			val processedItem = process(item)
+			// val wasEmpty = state.queue.isEmpty
+			state.queue = state.queue.enqueue(processedItem)
+			processedItem.flatMap(handleCompletedHead)
+			// if (wasEmpty) {
+			// 	log(s"setting up $item as new head")
+			// 	// This is the head. On complete, emit all completed items and set up the next head
+			// 	// assert(!state.outgoing.isDefined)
+      //
+			// 	// This batch of outgoing work is done when the downstream accepts the chunk of
+			// 	// items that were complete at the time of this item's completion
+      //
+			// 	// note: no need to chain of state.outgoing here (we can just replace it)
+			// 	// since this batch is guaranteed not to be accepted until the downstream
+			// 	// one already has.
+			// 	state.head = processedItem.flatMap(handleCompletedHead)
+			// }
+			// state.head
+		}
 
-			if (state.queue.size < bufLen) {
-				val fut = process(item)
-				state.queue.enqueue(fut)
-				fut.onComplete((_:Try[R]) => drainCompleted())
-				Future.successful(())
-			} else {
-				// queue full, wait for the first item to be done and then try again
-				val promise = Promise[Unit]()
-				state.queue.head.onComplete((_:Try[R]) => enqueue(item).foreach(promise.success))
-				promise.future
-			}
-		}.flatMap(identity)
+		// state.access { state =>
+		// 	_drainCompleted(state)
+    //
+		// 	if (state.queue.size < bufLen) {
+		// 		val fut = process(item)
+		// 		state.queue.enqueue(fut)
+		// 		fut.onComplete((_:Try[R]) => drainCompleted())
+		// 		Future.successful(())
+		// 	} else {
+		// 		// queue full, wait for the first item to be done and then try again
+		// 		val promise = Promise[Unit]()
+		// 		state.queue.head.onComplete((_:Try[R]) => enqueue(item).foreach(promise.success))
+		// 		promise.future
+		// 	}
+		// }.flatMap(identity)
 	}
 }
 
@@ -274,7 +339,7 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 	import Log.log
 	val threadPool = PerfTest.makeThreadPool(conf.parallelism)
 	val workEc = ExecutionContext.fromExecutor(threadPool)
-	val logId = Log.scope(s"Piepeline")
+	val logId = Log.scope(s"Pipeline")
 	def add(item: Int) = {
 		Sleep.jittered(conf.timePerStep, conf.jitter)
 		item + 1
@@ -285,31 +350,24 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 		val source = sourceIterator()
 		val sink = SequentialState(0, bufLen = conf.bufLen)
 		val drained = Promise[Int]()
-		def finalize(batch: List[Option[Int]]): Future[Unit] = {
-			log(s"sinking ${batch.length} items")
-			val transformSent = sink.sendTransform { current =>
-				val result = batch.foldLeft(current) { (a,b) =>
-					a + b.getOrElse(0)
+		def finalize(item: Option[Int]): Future[Unit] = {
+			log(s"finalizing ${item}")
+			item match {
+				case Some(item) => sink.sendTransform { current =>
+					val sum = current + item
+					log(s"size = ${sum} after adding $item to $current")
+					sum
 				}
-				log(s"size = ${result} after adding batch $batch to current $current")
-				result
-			}
-
-			if (batch.exists(_.isEmpty)) {
-				// read the final state
-				log("reading the final state")
-				transformSent.flatMap { case () =>
+				case None => {
+					// read the final state
+					log("reading the final state")
 					sink.access { count =>
 						log(s"final count: $count")
-						// if(count != 2) {
-						// 	drained.failure(new RuntimeException(s"expected 2, got $count"))
-						// } else {
-							drained.success(count)
-						// }
+						println(s"final count: $count")
+						drained.failure(new RuntimeException("Got: " + count))
+						// drained.success(count)
 					}
 				}
-			} else {
-				transformSent
 			}
 		}
 
@@ -319,24 +377,15 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 		}
 
 		def connect(
-			sink: Function[List[Option[Int]], Future[Unit]],
-			stages: Int):Function[List[Option[Int]], Future[Unit]] =
+			sink: Function[Option[Int], Future[Unit]],
+			stages: Int):Function[Option[Int], Future[Unit]] =
 		{
 			val logId = Log.scope(s"connect[$stages]")
 			val stage = new PipelineStage(conf.bufLen, process, sink)
-			def handleBatch(batch: List[Option[Int]]): Future[Unit] = {
-				// TODO: would a recursive fn be quicker?
-				batch.foldLeft(Future.successful(())) { (acc, item) =>
-					acc.flatMap { case () =>
-						log(s"enqueueing ${item}")
-						stage.enqueue(item)
-					}
-				}
-			}
 			if (stages == 1) {
-				handleBatch
+				stage.enqueue
 			} else {
-				connect(handleBatch, stages - 1)
+				connect(stage.enqueue, stages - 1)
 			}
 		}
 
@@ -345,10 +394,10 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 			if (source.hasNext) {
 				val item = source.next
 				Log(s"begin item $item")
-				fullPipeline(List(Some(item))).flatMap { case () => pushWork() }
+				fullPipeline(Some(item)).flatMap { case () => pushWork() }
 			} else {
 				Log(s"ending pipeline")
-				fullPipeline(List(None))
+				fullPipeline(None)
 			}
 		}
 
@@ -482,7 +531,7 @@ object PerfTest {
 		}
 		if (result.isFailure) {
 			Log("** failed **")
-			Log.dump(400)
+			Log.dump()
 			println(result)
 		}
 		val end = System.currentTimeMillis()
@@ -518,8 +567,8 @@ object PerfTest {
 	}
 
 	def main(): Unit = {
-		val repeat = this.repeat(50) _
-		val countLimit = 100000
+		val repeat = this.repeat(1) _
+		val countLimit = 10000
 		val largePipeline = PipelineConfig(
 			stages = 10,
 			len = 1000,
@@ -547,19 +596,19 @@ object PerfTest {
 			))
 		}
 
-		repeat("counter", List(
-			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
-			"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
-			"Akka counter" -> (() => CounterActor.run(countLimit)),
-			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
-		))
-		// runPipelineComparison("tiny", largePipeline.copy(len=2, stages=1))
-		runPipelineComparison("shallow + short", largePipeline.copy(len=largePipeline.len/10, stages=largePipeline.stages/3))
-		runPipelineComparison("shallow + medium", largePipeline.copy(len=largePipeline.len/2, stages=largePipeline.stages/3))
-		runPipelineComparison("shallow + long", largePipeline.copy(stages=largePipeline.stages/3))
-		runPipelineComparison("medium", largePipeline.copy(stages=largePipeline.stages/2))
-		runPipelineComparison("large", largePipeline)
-		runPipelineComparison("deep", largePipeline.copy(stages=largePipeline.stages*2, parallelism=2))
+		// repeat("counter", List(
+		// 	"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
+		// 	"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
+		// 	"Akka counter" -> (() => CounterActor.run(countLimit)),
+		// 	"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
+		// ))
+		runPipelineComparison("tiny", largePipeline.copy(len=30, stages=2))
+		// runPipelineComparison("shallow + short", largePipeline.copy(len=largePipeline.len/10, stages=largePipeline.stages/3))
+		// runPipelineComparison("shallow + medium", largePipeline.copy(len=largePipeline.len/2, stages=largePipeline.stages/3))
+		// runPipelineComparison("shallow + long", largePipeline.copy(stages=largePipeline.stages/3))
+		// runPipelineComparison("medium", largePipeline.copy(stages=largePipeline.stages/2))
+		// runPipelineComparison("large", largePipeline)
+		// runPipelineComparison("deep", largePipeline.copy(stages=largePipeline.stages*2, parallelism=2))
 
 		println("Done - shutting down...")
 		Await.result(actorSystem.terminate(), 2.seconds)

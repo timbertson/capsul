@@ -1,7 +1,10 @@
 package net.gfxmonk.sequentialstate.internal
 
+import java.util.concurrent.ConcurrentHashMap
 import scala.util.Sorting
-import scala.collection.mutable
+import scala.collection._
+import scala.collection.immutable.Queue
+import scala.collection.JavaConverters._
 import scala.language.experimental.macros
 import scala.annotation.tailrec
 
@@ -14,12 +17,17 @@ private [sequentialstate] class LogCtx(id: String, val buf: Log.LogBuffer) {
 }
 
 object Log {
-	// val ENABLE = true; type Ctx = LogCtx
-	val ENABLE = false; type Ctx = Unit
+	val ENABLE = true; type Ctx = LogCtx
+	// val ENABLE = false; type Ctx = Unit
 
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
-	type LogBuffer = mutable.Queue[LogEntry]
+	class MutableRef[T](initialValue: T) {
+		@volatile private var item: T = initialValue
+		def set(t: T) { item = t }
+		def get: T = { item }
+	}
+	type LogBuffer = MutableRef[Queue[LogEntry]]
 
 	private lazy val threads = {
 		if (!ENABLE) {
@@ -28,23 +36,16 @@ object Log {
 		}
 		println("\n\n ** WARNING ** Log is enabled; this should only be used for debugging\n\n")
 		Thread.sleep(500)
-		mutable.Map[Long, LogBuffer]()
+		new ConcurrentHashMap[Long, LogBuffer]()
 	}
 
 	def threadBuffer = {
 		val id = Thread.currentThread().getId()
-		threads.get(id) match {
+		Option(threads.get(id)) match {
 			case None => {
-				threads.synchronized {
-					threads.get(id) match {
-						case None => {
-							val buf: LogBuffer = mutable.Queue[LogEntry]()
-							threads.update(id, buf)
-							buf
-						}
-						case Some(buf) => buf
-					}
-				}
+				val buf: LogBuffer = new MutableRef(Queue[LogEntry]())
+				threads.putIfAbsent(id, buf)
+				threads.get(id)
 			}
 			case Some(buf) => buf
 		}
@@ -70,49 +71,72 @@ object Log {
 
 	def apply(msg: String): Unit = macro Macros.applyImpl
 
+
+	def dump() {
+		ifEnabled {
+			_dumpTo(None, None)
+		}
+	}
+
 	def dump(n: Int) {
 		ifEnabled {
-			dumpTo(n, lines => println(lines.mkString("\n")))
+			_dumpTo(Some(n), None)
 		}
 	}
 
 	def dumpTo(n: Int, printer: Function[Seq[String],Unit]) {
 		ifEnabled {
-			// XXX this is racey... just retry until it works?
-			@tailrec
-			def extractLogs(): List[String] = {
-				try {
-					threads.synchronized {
-						val buffers = threads.map { case (tid,logs) =>
-							logs.map (log => (tid,log))
-						}
-						val merged = buffers.foldLeft(Array[ThreadLogEntry]()) { (acc, lst) =>
-							// sort by timestamp
-							Sorting.stableSort(acc ++ lst, { (a:ThreadLogEntry, b: ThreadLogEntry) =>
-								(a,b) match {
-									case ((_tida, (tsa, _msga)), (_tidb, (tsb, _msgb))) => {
-										tsa < tsb
-									}
-								}
-							})
-						}
-						merged.reverse.take(n).reverse.toList.map { case (tid,(time, msg)) =>
-							s"-- $time|$tid: $msg"
-						}
-					}
-				} catch {
-					case e:Exception => {
-						printer(Seq(s"*** Error extracting logs: $e; trying again"))
-						return extractLogs()
-					}
-				}
-			}
-
-			val logs = extractLogs()
-			val header = s"== Printing up to $n log lines =="
-			printer(header :: logs)
+			_dumpTo(Some(n), Some(printer))
 		}
 	}
+
+	def dumpTo(printer: Function[Seq[String],Unit]) {
+		ifEnabled {
+			_dumpTo(None, Some(printer))
+		}
+	}
+
+	def _dumpTo(n: Option[Int], printerOpt: Option[Function[Seq[String],Unit]]) {
+		val printer: Function[Seq[String],Unit] = printerOpt.getOrElse(lines => println(lines.mkString("\n")))
+
+		// XXX this is racey, it will fail sometimes due to concurrently accessing mutable structures :(
+		def extractLogs(): List[String] = {
+			try {
+				val buffers = threads.entrySet().asScala.map { case entry =>
+					val tid = entry.getKey
+					val logs = entry.getValue
+					logs.get.map(log => (tid,log))
+				}
+				val merged = buffers.foldLeft(Array[ThreadLogEntry]()) { (acc, lst) =>
+					// sort by timestamp
+					Sorting.stableSort(acc ++ lst, { (a:ThreadLogEntry, b: ThreadLogEntry) =>
+						(a,b) match {
+							case ((_tida, (tsa, _msga)), (_tidb, (tsb, _msgb))) => {
+								tsa < tsb
+							}
+						}
+					})
+				}
+				var lines = n match {
+					case Some(n) => merged.reverse.take(n).reverse
+					case None => merged
+				}
+				
+				lines.toList.map { case (tid,(time, msg)) =>
+					s"-- $time|$tid: $msg"
+				}
+			} catch {
+				case e:Exception => {
+					return List(s"*** Error extracting logs: $e")
+				}
+			}
+		}
+
+		val logs = extractLogs()
+		val header = s"== Printing up to $n log lines =="
+		printer(header :: logs)
+	}
+
 
 	object Macros {
 		import scala.reflect.macros.blackbox
@@ -160,10 +184,11 @@ object Log {
 
 		def doLog(buf: LogBuffer, s: String) {
 			val time = System.nanoTime()
-			buf.enqueue(time -> s)
-			if (buf.length > 1000) {
-				buf.dequeue()
+			var queue = buf.get.enqueue(time -> s)
+			if (queue.length > 1000) {
+				queue = queue.dequeue._2
 			}
+			buf.set(queue)
 		}
 
 		def makeId(obj: Any, desc: String) = {

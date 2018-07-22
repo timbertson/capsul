@@ -107,8 +107,6 @@ class Ring[T >: Null <: AnyRef](size: Int) {
 	if (size > MAX_SIZE) {
 		throw new RuntimeException(s"size ($size) is larger then the maximum ($MAX_SIZE)")
 	}
-	// we need the first inserted tail to advance `ready` to 0 (TODO: CHECK)
-	// @volatile var readyIndex = negativeOne
 
 	private val bounds = size * 2
 	private val negativeOne = bounds - 1
@@ -237,12 +235,10 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				val numDequeue = Math.min(spaceAvailable, numQueued)
 				val nextState = ring.dequeueAndReserve(state, numDequeue, 0)
 				if (stateRef.compareAndSet(state, nextState)) {
-					// We reserved all the slots we asked for,
-					// we need to set items then advance `ready` to our slot.
+					// We reserved all the slots we asked for, now assign into those slots
 					log(s"reserved ${numDequeue} dequeue slots from ${Ring.tailIndex(state)}")
 					val prevTail = Ring.tailIndex(state)
 					val _:Idx = dequeueItemsInto(prevTail, numDequeue)
-					// setReady(ring.add(prevTail, numDequeue))
 					startIfEmpty(state)
 					return numDequeue
 				} else {
@@ -277,11 +273,9 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				if (numWork != 0) {
 					log(s"inserting work into $nextIdx")
 					ring.at(nextIdx).set(work)
-					// setReady(prevTail, nextIdx)
 					startIfEmpty(state)
 					return true
 				} else {
-					// setReady(ring.add(prevTail, numDequeue))
 					startIfEmpty(state)
 					// gazumped by queued work; retry
 					return doEnqueue(work)

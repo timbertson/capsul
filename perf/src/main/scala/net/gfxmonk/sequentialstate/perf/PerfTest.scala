@@ -201,7 +201,7 @@ object CounterState {
 class PipelineStage[T,R](
 	bufLen: Int,
 	process: Function[T,Future[R]],
-	handleCompleted: Function[List[Try[R]], Future[_]]
+	handleCompleted: Function[List[R], Future[_]]
 )(implicit ec: ExecutionContext) {
 	import Log.log
 	val state = SequentialState(v = new State(), bufLen = bufLen)
@@ -220,11 +220,11 @@ class PipelineStage[T,R](
 		}
 
 		// pop off completed items, but only in order (i.e. stop at the first incomplete item)
-		val ret = new mutable.ListBuffer[Try[R]]()
+		val ret = new mutable.ListBuffer[R]()
 		while(true) {
 			state.queue.headOption match {
 				case Some(f) if f.isCompleted => {
-					ret.append(f.value.get)
+					ret.append(f.value.get.get)
 					state.queue.dequeue()
 				}
 				case _ => {
@@ -269,31 +269,43 @@ class PipelineStage[T,R](
 }
 
 case class PipelineConfig(stages: Int, len: Int, bufLen: Int, parallelism: Int, timePerStep: Float, jitter: Float)
-object Pipeline {
-	import Log.log
-	def runSeq(conf: PipelineConfig)(implicit ec: ExecutionContext): Future[Int] = {
-		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
-		val workEc = ExecutionContext.fromExecutor(threadPool)
 
-		val source = Iterable.range(0, conf.len).toIterator
+class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
+	import Log.log
+	val threadPool = PerfTest.makeThreadPool(conf.parallelism)
+	val workEc = ExecutionContext.fromExecutor(threadPool)
+	val logId = Log.scope(s"Piepeline")
+	def add(item: Int) = {
+		Sleep.jittered(conf.timePerStep, conf.jitter)
+		item + 1
+	}
+	def sourceIterator() = Iterable.range(0, conf.len).toIterator
+
+	def runSeq()(implicit ec: ExecutionContext): Future[Int] = {
+		val source = sourceIterator()
 		val sink = SequentialState(0, bufLen = conf.bufLen)
 		val drained = Promise[Int]()
-		val logId = Log.scope("Pipeline")
-		def finalize(batch: List[Try[Option[Int]]]): Future[Unit] = {
+		def finalize(batch: List[Option[Int]]): Future[Unit] = {
 			log(s"sinking ${batch.length} items")
 			val transformSent = sink.sendTransform { current =>
-				val addition = batch.map(_.get.getOrElse(0)).sum
-				log(s"after batch $addition ($batch), size = ${current + addition}")
-				current + addition
+				val result = batch.foldLeft(current) { (a,b) =>
+					a + b.getOrElse(0)
+				}
+				log(s"size = ${result} after adding batch $batch to current $current")
+				result
 			}
 
-			if (batch.exists(_.get.isEmpty)) {
+			if (batch.exists(_.isEmpty)) {
 				// read the final state
 				log("reading the final state")
 				transformSent.flatMap { case () =>
 					sink.access { count =>
 						log(s"final count: $count")
-						drained.success(count)
+						// if(count != 2) {
+						// 	drained.failure(new RuntimeException(s"expected 2, got $count"))
+						// } else {
+							drained.success(count)
+						// }
 					}
 				}
 			} else {
@@ -303,25 +315,21 @@ object Pipeline {
 
 		def process(item: Option[Int]):Future[Option[Int]] = {
 			log(s"begin processing item $item")
-			Future({
-				item.map { (item: Int) =>
-					Sleep.jittered(conf.timePerStep, conf.jitter)
-					item + 1
-				}
-			})(workEc)
+			Future(item.map(add))(workEc)
 		}
 
 		def connect(
-			sink: Function[List[Try[Option[Int]]], Future[Unit]],
-			stages: Int):Function[List[Try[Option[Int]]], Future[Unit]] =
+			sink: Function[List[Option[Int]], Future[Unit]],
+			stages: Int):Function[List[Option[Int]], Future[Unit]] =
 		{
 			val logId = Log.scope(s"connect[$stages]")
 			val stage = new PipelineStage(conf.bufLen, process, sink)
-			def handleBatch(batch: List[Try[Option[Int]]]): Future[Unit] = {
+			def handleBatch(batch: List[Option[Int]]): Future[Unit] = {
+				// TODO: would a recursive fn be quicker?
 				batch.foldLeft(Future.successful(())) { (acc, item) =>
 					acc.flatMap { case () =>
-						log(s"enqueueing ${item.get}")
-						stage.enqueue(item.get)
+						log(s"enqueueing ${item}")
+						stage.enqueue(item)
 					}
 				}
 			}
@@ -337,10 +345,10 @@ object Pipeline {
 			if (source.hasNext) {
 				val item = source.next
 				Log(s"begin item $item")
-				fullPipeline(List(Success(Some(item)))).flatMap { case () => pushWork() }
+				fullPipeline(List(Some(item))).flatMap { case () => pushWork() }
 			} else {
-				Log(s"pipeline complete")
-				fullPipeline(List(Success(None)))
+				Log(s"ending pipeline")
+				fullPipeline(List(None))
 			}
 		}
 
@@ -350,22 +358,15 @@ object Pipeline {
 		}
 	}
 
-	def runMonix(conf: PipelineConfig)(implicit sched: monix.execution.Scheduler):Future[Int] = {
-
-		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
-		val workEc = ExecutionContext.fromExecutor(threadPool)
-
+	def runMonix()(implicit sched: monix.execution.Scheduler):Future[Int] = {
 		import monix.eval._
 		import monix.reactive._
 		import monix.reactive.OverflowStrategy.BackPressure
 
-		val source = Observable.fromIterator( Iterator.continually { 0 }.take(conf.len) )
+		val source = Observable.fromIterator(sourceIterator())
 
 		def process(item: Int):Future[Int] = {
-			Future({
-				Sleep.jittered(conf.timePerStep, conf.jitter)
-				item + 1
-			})(workEc)
+			Future(add(item))(workEc)
 		}
 
 		def connect(obs: Observable[Int], stages: Int): Observable[Int] = {
@@ -383,36 +384,26 @@ object Pipeline {
 		ret
 	}
 
-	def runAkka(
-		conf: PipelineConfig
-	)(implicit system: ActorSystem, materializer: Materializer):Future[Int] = {
+	def runAkkaStreams()(implicit system: ActorSystem, materializer: Materializer):Future[Int] = {
 		import akka.stream._
 		import akka.stream.scaladsl._
 		import akka.{ NotUsed, Done }
 		import scala.concurrent._
 
-		val threadPool = PerfTest.makeThreadPool(conf.parallelism)
-		val workEc = ExecutionContext.fromExecutor(threadPool)
-
-		val source: Source[Option[Int], NotUsed] = Source.fromIterator(() =>
-			Iterator.continually { Some(0) }.take(conf.len)
-		)
-		val sink = Sink.fold[Int,Option[Int]](0) { (i, token) =>
-			i + token.getOrElse(0)
+		val source: Source[Int, NotUsed] = Source.fromIterator(sourceIterator)
+		val sink = Sink.fold[Int,Int](0) { (i, token) =>
+			log(s"accumulating $i + $token")
+			i + token
 		}
 
-		def process(item: Option[Int]):Future[Option[Int]] = {
-			Future({
-				item.map { (item:Int) =>
-					Sleep.jittered(conf.timePerStep, conf.jitter)
-					item + 1
-				}
-			})(workEc)
+		def process(item: Int):Future[Int] = {
+			log(s"begin processing item $item")
+			Future(add(item))(workEc)
 		}
 
 		def connect(
-			source: Source[Option[Int], NotUsed],
-			stages: Int): Source[Option[Int], NotUsed] = {
+			source: Source[Int, NotUsed],
+			stages: Int): Source[Int, NotUsed] = {
 			if (stages == 0) {
 				source
 			} else {
@@ -424,6 +415,7 @@ object Pipeline {
 
 		flow.toMat(sink)(Keep.right).run().map({ ret =>
 			threadPool.shutdown()
+			// throw new RuntimeException(s"I got $ret")
 			ret
 		})(workEc)
 	}
@@ -526,28 +518,8 @@ object PerfTest {
 	}
 
 	def main(): Unit = {
-		val repeat = this.repeat(20) _
-
-		import akka.actor.ActorSystem
-		implicit val actorSystem = ActorSystem("akka-example", defaultExecutionContext=Some(ec))
-		implicit val akkaMaterializer = ActorMaterializer()
-
-		// so yuck! Note that each actor's context has a receiveTimeout
-		// but it might be infinite, so we can't use it?
-		implicit val timeout: Timeout = Timeout(1.minute)
-
-
-		val countLimit = 10000
-		repeat("counter", List(
-			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
-			"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
-			"Akka counter" -> (() => CounterActor.run(countLimit)),
-			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
-		))
-
-		// pipeline comparison:
-		val monixScheduler = monix.execution.Scheduler(ec)
-
+		val repeat = this.repeat(50) _
+		val countLimit = 100000
 		val largePipeline = PipelineConfig(
 			stages = 10,
 			len = 1000,
@@ -557,20 +529,37 @@ object PerfTest {
 			jitter = 0.3f
 		)
 
+		import akka.actor.ActorSystem
+		implicit val actorSystem = ActorSystem("akka-example", defaultExecutionContext=Some(ec))
+		implicit val akkaMaterializer = ActorMaterializer()
+		val monixScheduler = monix.execution.Scheduler(ec)
+
+		// so yuck! Note that each actor's context has a receiveTimeout
+		// but it might be infinite, so we can't use it?
+		implicit val timeout: Timeout = Timeout(1.minute)
+
+
 		def runPipelineComparison(desc: String, conf: PipelineConfig) = {
 			repeat(s"$desc pipeline ($conf)", List(
-				s"* SequentialState" -> (() => Pipeline.runSeq(conf)),
-				s"Akka" -> (() => Pipeline.runAkka(conf)),
-				s"Monix" -> (() => Pipeline.runMonix(conf)(monixScheduler))
+				s"* SequentialState" -> (() => new Pipeline(conf).runSeq()),
+				s"Akka Streams" -> (() => new Pipeline(conf).runAkkaStreams()),
+				s"Monix" -> (() => new Pipeline(conf).runMonix()(monixScheduler))
 			))
 		}
 
-		runPipelineComparison("shallow + short", largePipeline.copy(len=100, stages=3))
-		runPipelineComparison("shallow + medium", largePipeline.copy(len=500, stages=3))
-		runPipelineComparison("shallow + long", largePipeline.copy(stages=3))
-		runPipelineComparison("medium", largePipeline.copy(stages=5))
+		repeat("counter", List(
+			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
+			"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
+			"Akka counter" -> (() => CounterActor.run(countLimit)),
+			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
+		))
+		// runPipelineComparison("tiny", largePipeline.copy(len=2, stages=1))
+		runPipelineComparison("shallow + short", largePipeline.copy(len=largePipeline.len/10, stages=largePipeline.stages/3))
+		runPipelineComparison("shallow + medium", largePipeline.copy(len=largePipeline.len/2, stages=largePipeline.stages/3))
+		runPipelineComparison("shallow + long", largePipeline.copy(stages=largePipeline.stages/3))
+		runPipelineComparison("medium", largePipeline.copy(stages=largePipeline.stages/2))
 		runPipelineComparison("large", largePipeline)
-		runPipelineComparison("deep", largePipeline.copy(stages=20, parallelism=2))
+		runPipelineComparison("deep", largePipeline.copy(stages=largePipeline.stages*2, parallelism=2))
 
 		println("Done - shutting down...")
 		Await.result(actorSystem.terminate(), 2.seconds)

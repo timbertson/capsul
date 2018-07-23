@@ -198,6 +198,69 @@ object CounterState {
 }
 
 
+// XXX investigate why this implementation appears to stall on large pipelines...
+// class PipelineStage[T,R](
+// 	index: Int,
+// 	bufLen: Int,
+// 	process: Function[T,Future[R]],
+// 	handleCompleted: Function[R, Future[Unit]]
+// )(implicit ec: ExecutionContext) {
+// 	import Log.log
+// 	val stateRef = SequentialState(v = new State(), bufLen = bufLen)
+// 	val logId = Log.scope(s"PipelineStage-${index}")
+//
+// 	class State {
+// 		var queue = Queue[Future[R]]()
+// 		var pending: Future[Unit] = Future.successful(())
+// 	}
+//
+// 	private def onItemCompleted(item: R): Future[Unit] = {
+// 		// need to re-access state
+// 		stateRef.accessAsync { state =>
+// 			if (!state.pending.isCompleted) {
+// 				state.pending.onComplete { _ => onItemCompleted(item) }
+// 				return state.pending
+// 			}
+//
+// 			val (readyItems, newQueue) = state.queue.span(_.isCompleted)
+// 			state.pending = if (readyItems.isEmpty) {
+// 				log(s"item processed: ${item} but nothing ready in ${newQueue}")
+// 				Future.successful(())
+// 			} else {
+// 				log(s"Emitting events downstream: ${readyItems} (on completion of ${item}). pending: ${newQueue}")
+// 				val initial = state.pending
+// 				val batchPushed = readyItems.foldLeft(initial) { (acc, item) =>
+// 					acc.flatMap { case () =>
+// 						handleCompleted(item.value.get.get)
+// 					}
+// 				}
+// 				state.queue = newQueue
+// 				batchPushed
+// 			}
+// 			state.pending
+// 		}
+// 	}
+//
+// 	def enqueue(item: T):Future[Unit] = {
+// 		log(s"enqueueing ${item}")
+// 		stateRef.sendAccessAsync { state =>
+// 			log(s"manipulating state for ${item}")
+// 			val processedItem = process(item)
+// 			state.queue = state.queue.enqueue(processedItem)
+// 			processedItem.flatMap(onItemCompleted)
+// 		}
+// 	}
+// }
+
+object PipelineStage {
+	val completedFuture = Future.successful(())
+	class State[R] {
+		var queue = Queue[(Future[R], Promise[Unit])]()
+		var outgoing: Future[Unit] = completedFuture
+		override def toString(): String = s"State($queue, $outgoing)"
+	}
+}
+
 class PipelineStage[T,R](
 	index: Int,
 	bufLen: Int,
@@ -205,48 +268,54 @@ class PipelineStage[T,R](
 	handleCompleted: Function[R, Future[Unit]]
 )(implicit ec: ExecutionContext) {
 	import Log.log
-	val stateRef = SequentialState(v = new State(), bufLen = bufLen)
+	import PipelineStage._
+	val stateRef = SequentialState(v = new State[R](), bufLen = bufLen)
 	val logId = Log.scope(s"PipelineStage-${index}")
 
-	class State {
-		var queue = Queue[Future[R]]()
-		var pending: Future[Unit] = Future.successful(())
-	}
-
-	private def onItemCompleted(item: R): Future[Unit] = {
+	private def onItemCompleted(item: Any): Future[Unit] = {
 		// need to re-access state
 		stateRef.accessAsync { state =>
-			if (!state.pending.isCompleted) {
-				state.pending.onComplete { _ => onItemCompleted(item) }
-				return state.pending
+			if (!state.outgoing.isCompleted) {
+				state.outgoing.onComplete { _ => onItemCompleted(item) }
+				log(s"outgoing is still running on completion of ${item}, returning")
+				return state.outgoing
 			}
 
-			val (readyItems, newQueue) = state.queue.span(_.isCompleted)
-			state.pending = if (readyItems.isEmpty) {
+			// queue up a new batch
+			val (readyItems, newQueue) = state.queue.span(_._1.isCompleted)
+			state.outgoing = if (readyItems.isEmpty) {
 				log(s"item processed: ${item} but nothing ready in ${newQueue}")
-				Future.successful(())
+				completedFuture
 			} else {
-				log(s"Emitting events downstream: ${readyItems} (on completion of ${item}). pending: ${newQueue}")
-				val initial = state.pending
-				val batchPushed = readyItems.foldLeft(initial) { (acc, item) =>
+				state.queue = newQueue
+				log(s"Emitting events downstream: ${readyItems} (on completion of ${item}). incomplete: ${newQueue}")
+				val initial = state.outgoing
+				val everythingPushed = readyItems.foldLeft(initial) { (acc, item) =>
 					acc.flatMap { case () =>
-						handleCompleted(item.value.get.get)
+						val emitted = handleCompleted(item._1.value.get.get)
+						emitted.onComplete(_ => item._2.success(()))
+						emitted
 					}
 				}
-				state.queue = newQueue
-				batchPushed
+				everythingPushed.onComplete { _ =>
+					log(s"batch ${readyItems} is fully pushed out; calling onItemCompleted in case there are more completed items")
+					onItemCompleted(())
+				}
+				everythingPushed
 			}
-			state.pending
+			state.outgoing
 		}
 	}
 
 	def enqueue(item: T):Future[Unit] = {
 		log(s"enqueueing ${item}")
 		stateRef.sendAccessAsync { state =>
-			log(s"manipulating state for ${item}")
+			log(s"manipulating state for ${item}, state = $state")
+			val promise = Promise[Unit]()
 			val processedItem = process(item)
-			state.queue = state.queue.enqueue(processedItem)
-			processedItem.flatMap(onItemCompleted)
+			state.queue = state.queue.enqueue((processedItem, promise))
+			processedItem.onComplete(onItemCompleted)
+			promise.future
 		}
 	}
 }
@@ -260,7 +329,7 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 	val logId = Log.scope(s"Pipeline")
 	def add(item: Int) = {
 		Sleep.jittered(conf.timePerStep, conf.jitter)
-		item // XXX + 1
+		item + 1
 	}
 	def sourceIterator() = Iterable.range(0, conf.len).toIterator
 
@@ -443,7 +512,7 @@ object PerfTest {
 		val start = System.currentTimeMillis()
 		val f = impl
 		val result = Try {
-			Await.result(f(), Duration(1, TimeUnit.SECONDS))
+			Await.result(f(), Duration(3, TimeUnit.SECONDS))
 			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {

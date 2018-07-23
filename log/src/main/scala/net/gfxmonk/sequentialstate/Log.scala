@@ -17,8 +17,8 @@ private [sequentialstate] class LogCtx(id: String, val buf: Log.LogBuffer) {
 }
 
 object Log {
-	// val ENABLE = true; type Ctx = LogCtx
-	val ENABLE = false; type Ctx = Unit
+	val ENABLE = true; type Ctx = LogCtx
+	// val ENABLE = false; type Ctx = Unit
 
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
@@ -121,9 +121,15 @@ object Log {
 					case Some(n) => merged.reverse.take(n).reverse
 					case None => merged
 				}
-				
-				lines.toList.map { case (tid,(time, msg)) =>
-					s"-- $time|$tid: $msg"
+				if (lines.isEmpty) {
+					Nil
+				} else {
+					val minTimestamp = lines.head._2._1
+					lines.toList.map { case (tid,(time, msg)) =>
+						val timeSecs = (time / 1000000).toFloat // XXX is this nanos?
+						// TODO: format to 3 digits
+						s"-- ${time}|$tid: $msg"
+					}
 				}
 			} catch {
 				case e:Exception => {
@@ -133,7 +139,7 @@ object Log {
 		}
 
 		val logs = extractLogs()
-		val header = s"== Printing up to $n log lines =="
+		val header = s"== Printing ${n match { case None => "all available"; case Some(n) => s"up to $n" }} log lines =="
 		printer(header :: logs)
 	}
 

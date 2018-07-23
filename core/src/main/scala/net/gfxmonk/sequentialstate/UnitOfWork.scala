@@ -117,6 +117,8 @@ object UnitOfWork {
 		}
 
 		final def reportFailure(error: Throwable): Option[Future[_]] = {
+			Console.err.println(s"Uncaught error in enqueued task: $error")
+			error.printStackTrace()
 			None
 		}
 	}

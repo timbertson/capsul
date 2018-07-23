@@ -361,6 +361,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 						// now that we've incremented running futures, set it up to decrement on completion
 						f.onComplete { _ =>
 							numFuturesRef.decrement()
+							log(s"item completed asynchronously, there are now ${numFuturesRef.get} outstanding futures")
 							// try to dequeue. If there's no space available then either someone
 							// beat us to it, or there was a temporary burst of >bufLen async items
 							dequeueIfSpace(stateRef.get)
@@ -411,7 +412,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			// state _must_ have been set to the most recent post-CAS result,
 			// so we can now use it to determine whether to stop
 			if (Ring.isStopped(state)) {
-				log("shutting down")
+				log(s"shutting down with state ${Ring.repr(state)} and ${numFuturesRef.get} pending futures")
 				return
 			} else {
 				// there's more work coming, just continue

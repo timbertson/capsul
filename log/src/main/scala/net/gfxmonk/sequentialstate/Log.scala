@@ -17,8 +17,8 @@ private [sequentialstate] class LogCtx(id: String, val buf: Log.LogBuffer) {
 }
 
 object Log {
-	val ENABLE = true; type Ctx = LogCtx
-	// val ENABLE = false; type Ctx = Unit
+	// val ENABLE = true; type Ctx = LogCtx
+	val ENABLE = false; type Ctx = Unit
 
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
@@ -126,9 +126,8 @@ object Log {
 				} else {
 					val minTimestamp = lines.head._2._1
 					lines.toList.map { case (tid,(time, msg)) =>
-						val timeSecs = (time / 1000000).toFloat // XXX is this nanos?
-						// TODO: format to 3 digits
-						s"-- ${time}|$tid: $msg"
+						val timeSecs = ((time - minTimestamp).toFloat / 1000000000) // nanos -> relative seconds
+						f"-- ${timeSecs.formatted("%-2.9f")}|$tid: $msg"
 					}
 				}
 			} catch {

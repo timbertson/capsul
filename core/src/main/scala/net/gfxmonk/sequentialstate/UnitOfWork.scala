@@ -23,18 +23,18 @@ trait UnitOfWork[A] extends EnqueueableTask {
 		try {
 			reportSuccess(fn())
 		} catch {
-			case e:Throwable => {
-				if (NonFatal(e)) {
-					reportFailure(e)
-				} else {
-					throw e
-				}
+			case NonFatal(e) => {
+				reportFailure(e)
 			}
 		}
 	}
 }
 
 object UnitOfWork {
+	val noop: EnqueueableTask = new EnqueueableTask {
+		override def enqueuedAsync() = ()
+		override def run() = None
+	}
 	trait HasExecutionContext {
 		protected val ec: ExecutionContext
 	}
@@ -117,6 +117,8 @@ object UnitOfWork {
 		}
 
 		final def reportFailure(error: Throwable): Option[Future[_]] = {
+			Console.err.println(s"Uncaught error in enqueued task: $error")
+			error.printStackTrace()
 			None
 		}
 	}

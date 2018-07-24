@@ -42,14 +42,14 @@ lazy val perf = (project in file("perf")).settings(
   libraryDependencies += "io.monix" %% "monix" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-perf"
-).dependsOn(core).dependsOn(log % "compile-internal")
+).dependsOn(core).dependsOn(log)
 
 lazy val examples = (project in file("examples")).settings(
   hiddenProject,
   libraryDependencies += "io.monix" %% "monix-eval" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-examples"
-).dependsOn(core)
+).dependsOn(core).dependsOn(log % "compile-internal")
 
 
 publishMavenStyle := true

@@ -11,7 +11,7 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 
 /** A wrapper for getting / setting state */
 class Ref[T](init:T) {
-	@volatile private var v = init
+	private var v = init
 	def current = v
 	def set(updated:T) {
 		v = updated
@@ -65,7 +65,7 @@ after the function completes, but the task won't be considered done
 
 This means that you must be careful with `mutate` actions or with mutable
 state objects - you may mutate the state during the execution of the
-function, but you may not do so asynchronously (e.g. when your future
+function, but you may not do so asynchronously (e.g. after your future
 completes)
 
  - '''(empty)''': Synchronous. The task is completed as soon as it returns.
@@ -98,7 +98,7 @@ class SequentialState[T](init: T, thread: SequentialExecutor) {
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyStaged(() => fn(state.current)))
 
 	/** Send an access operation which returns a [[Future]][R] */
-	def sendAccessAsync[A](fn: T => StagedFuture[A]): Future[Unit] =
+	def sendAccessAsync[A](fn: T => Future[A]): Future[Unit] =
 		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
 
 	/** Return the current state value */

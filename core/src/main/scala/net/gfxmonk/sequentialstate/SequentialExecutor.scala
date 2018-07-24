@@ -1,12 +1,156 @@
 package net.gfxmonk.sequentialstate
 
 import java.util.concurrent.locks.LockSupport
+import java.util.concurrent.ConcurrentLinkedQueue
 import scala.annotation.tailrec
 import net.gfxmonk.sequentialstate.internal.Log
 
-import monix.execution.atomic.Atomic
+import monix.execution.atomic._
 
 import scala.concurrent.{ExecutionContext, Future}
+
+
+class RingItem[T>:Null<:AnyRef] {
+	@volatile private var contents:T = null
+	def set(item:T) {
+		contents = item
+	}
+
+	def get: T = {
+		contents
+	}
+}
+
+/* Topography / terminology
+ *
+ * RingBuffer is based on https://www.snellman.net/blog/archive/2016-12-13-ring-buffers/
+ * (except that we overflow at 2*size, rather than relying on size being a power of 2)
+ *
+ * If head == tail, the queue is empty
+ * If (head + size) % (2*size) == tail, the queue is full
+ * (these wrap to the same index mod `size`, but are on different sides / folds)
+ *
+ * The queue of an executoe is managed by:
+ * state: (head|tail|numQueued) - bin packed to save on tuple allocation (we make and discard a _lot_ of these)
+ * numFutures: Atomic[Int] (could do separate numFuturesStarted and numFuturesStopped, but have to take care of wraparound)
+ * queue: a ConcurrentLinkedQueue for putting items which haven't yet been accepted into the ring buffer.
+ *
+ * To see if there's physically space available, compare head & tail. If there's space but it appears to be taken by numFutures, don't enqueue.
+ * If we're running a loop of many futures, we could delay the future bookeeping until every `n` items.
+ *
+ * We can get away with not tying numFutures into state, because it's advisory. If we run ahead / behind a little bit, it doesn't matter because
+ * it doesn't affect correctness.
+ */
+object Ring {
+	type Count = Int
+	type Idx = Int
+
+	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
+	val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
+	val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
+	def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
+
+	// if there's no work, we are (or should be) stopped
+	def isStopped(t:State): Boolean = tailIndex(t) == headIndex(t)
+
+	// just for testing / debugging
+	def repr(t:State) = {
+		(headIndex(t), tailIndex(t), numQueued(t))
+	}
+
+
+
+
+	// ------------------------------------------------
+	// // # Simple implementation, for debugging
+	// type State = (Int, Int, Int)
+	// type AtomicState = AtomicAny[State]
+	// def make(head: Idx, tail: Idx, numQueued: Count) = {
+	// 	(head, tail, numQueued)
+	// }
+	// def headIndex(t:State):Idx = t._1
+	// def tailIndex(t:State):Idx = t._2
+	// def numQueued(t:State):Count = t._3
+	// def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
+	// ------------------------------------------------
+	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
+	type State = Long
+	type AtomicState = AtomicLong
+	private val HEAD_OFFSET = 48 // 64 - 16
+	private val TAIL_OFFSET = 32 // 64 - (2*16)
+	private val IDX_MASK = 0xffff // 2 bytes (16 bits)
+	private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
+	def make(head: Idx, tail: Idx, numQueued: Count) = {
+		(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
+	}
+	def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
+	def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
+	def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
+	def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
+	// ------------------------------------------------
+
+}
+
+class Ring[T >: Null <: AnyRef](size: Int) {
+	import Ring._
+	if (size > MAX_SIZE) {
+		throw new RuntimeException(s"size ($size) is larger then the maximum ($MAX_SIZE)")
+	}
+
+	private val bounds = size * 2
+	private val negativeOne = bounds - 1
+	private var arr = Array.fill(size)(new RingItem[T])
+
+	def mask(idx: Idx): Idx = (idx % size)
+
+	def at(idx: Idx): RingItem[T] = arr(mask(idx)) // unsafe woo
+
+	def add(i: Idx, n: Int) = {
+		// assumes `n` is never greater than `bounds`
+		val result = i + n
+		if (result >= bounds) {
+			result - bounds
+		} else {
+			result
+		}
+	}
+
+	def inc(a: Idx) = {
+		// assuming this is more efficient than add(a,1)
+		if (a == negativeOne) 0 else a + 1
+	}
+
+	// actually adding a negative is problematic due to `%` behaviour for negatives
+	def dec(a: Idx) = add(a, negativeOne)
+
+	def numItems(head: Idx, tail: Idx):Int = {
+		// queue is full when tail has wrapped around to one less than head
+		val diff = tail - head
+		if (diff < 0) {
+			diff + bounds // there's never negative space available, wrap around
+		} else {
+			diff
+		}
+	}
+
+	def spaceAvailable(s: State, numFutures: Int):Int = {
+		val space = size - numItems(Ring.headIndex(s), Ring.tailIndex(s)) - numFutures
+		// Note: numFuturesRef is not synchronized with the rest of state; it may be inaccurate
+		// (causing a negative space value)
+		if (space < 0) {
+			0
+		} else {
+			space
+		}
+	}
+
+	def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int): State = {
+		// dequeue up to numDequeue & reserve up to (numDequeue + numWork) ring slots
+		val head = headIndex(t)
+		val tail = tailIndex(t)
+		make(head, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
+	}
+}
 
 object SequentialExecutor {
 	val defaultBufferSize = 10
@@ -14,34 +158,14 @@ object SequentialExecutor {
 	private val successfulUnit = Future.successful(())
 }
 
-private final class Node[A](val item: A) {
-	@volatile var next: Node[A] = null
-	final def appearsAfter[A](parent: Node[A]): Boolean = {
-		var node = parent
-		while(node != null) {
-			if (node == this) {
-				return true
-			}
-			node = node.next
-		}
-		false
-	}
-}
-
-private final class Queued[A](val len: Int, val node: Node[A]) {
-	def add(newNode: Node[A]) = new Queued(len+1, newNode)
-}
-private object Queued {
-	def single[A](node: Node[A]) = new Queued(1, node)
-	def empty[A](node: Node[A]) = new Queued(0, node)
-}
-
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private val nullNode: Node[EnqueueableTask] = null
-	private val head = Atomic(nullNode)
-	private val queued = Atomic(Queued.empty(nullNode))
-	private val tail = Atomic(nullNode)
+	private val ring = new Ring[EnqueueableTask](bufLen)
+	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
+	private val stateRef:Ring.AtomicState = Atomic(Ring.make(0,0,0))
+	private val numFuturesRef:AtomicInt = Atomic(0)
+
 	import Log.log
+	import Ring._
 
 	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (doEnqueue(task)) {
@@ -63,315 +187,237 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	private def doEnqueue(work: EnqueueableTask):Boolean = {
-		var currentTail = tail.get
-		val newTail = new Node(work)
-		val logId = Log.scope(this, s"doEnqueue(${System.identityHashCode(newTail)})")
-
-		// may race with other enqueuer threads
-		var logTailCount = 1
-		while(!tail.compareAndSet(currentTail, newTail)) {
-			// logTailCount += 1
-			if(logTailCount > 5) log("logTailCount: " + logTailCount)
-			currentTail = tail.get
+	private def dequeueItemsInto(dest: Idx, numItems: Int): Idx = {
+		val logId = Log.scope(s"dequeueItemsInto($dest, $numItems)")
+		var idx = dest
+		var n = numItems
+		while(n > 0) {
+			var queued = queue.poll()
+			while (queued == null) {
+				// spinloop, since reserved (but un-populated) slots
+				// in the ring will hold up the executor (and we
+				// also run this from the executor)
+				queued = queue.poll()
+			}
+			log(s"dequeued item for index $idx")
+			ring.at(idx).set(queued)
+			queued.enqueuedAsync()
+			idx = ring.inc(idx)
+			n -= 1
 		}
-		log("added to tail")
+		return idx
+	}
 
-		if (currentTail == null) {
-			log(s"currentTail == null; beginning loop with ${workLoop.numInProgress} in progress items")
-			// we're the first item! runloop is definitely not running
-			queued.set(new Queued(workLoop.numInProgress + 1, newTail))
-			head.set(newTail)
+	private def startIfEmpty(state: State) {
+		if (Ring.isStopped(state)) {
 			ec.execute(workLoop)
-			true
-		} else {
-			// nodes must be present in the linked list before adding them to `queued`
-			// (also we want the consumer to see new tasks ASAP)
-			currentTail.next = newTail
-			log(s"set currentTail.next")
+		}
+	}
 
-			// now update `queued`
-			var logQueueCount = 0
-			while(true) {
-				logQueueCount += 1
-				if(logQueueCount > 5) log("..ongoing queue attempts: " + logQueueCount)
-				val currentQueued = queued.get
-				log("currentQueued = " + currentQueued)
-				if (currentQueued.len == bufLen) {
-					log("at capacity; not advancing queued")
-					return false
+	@tailrec
+	private def dequeueIfSpace(state: State): Int = {
+		val logId = Log.scope("dequeueIfSpace")
+		val numQueued = Ring.numQueued(state)
+		if (numQueued > 0) {
+			val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)
+			if (spaceAvailable > 0) {
+				// try inserting at `tail`
+				log(s"space may be available (${Ring.repr(state)})")
+				val numQueued = Ring.numQueued(state)
+				val numDequeue = Math.min(spaceAvailable, numQueued)
+				val nextState = ring.dequeueAndReserve(state, numDequeue, 0)
+				if (stateRef.compareAndSet(state, nextState)) {
+					// We reserved all the slots we asked for, now assign into those slots
+					log(s"reserved ${numDequeue} dequeue slots from ${Ring.tailIndex(state)}")
+					val prevTail = Ring.tailIndex(state)
+					val _:Idx = dequeueItemsInto(prevTail, numDequeue)
+					startIfEmpty(state)
+					return numDequeue
 				} else {
-					if (currentQueued.node.eq(currentTail)) {
-						// common case: we added a node, and now we can (try to) enqueue it
-						if (queued.compareAndSet(currentQueued, currentQueued.add(newTail))) {
-							log(s"below capacity (${currentQueued.len} < ${bufLen}, advanced node by one")
-							return true
-						}
-					} else if (currentQueued.node.eq(newTail)) {
-						log("below capacity, but new node is already enqueued")
-						return true
-					} else {
-						val queuedNode = currentQueued.node
-						if (newTail.appearsAfter(queuedNode)) {
-							// We need `queued` to advance until either we reach buflen or the
-							// task we added, and any thread knows enough to do that. Give it a go,
-							// but don't retry if someone beats us to it.
-							log("below capacity; attempting to advance queued by one")
-							val _:Boolean = queued.compareAndSet(currentQueued, currentQueued.add(currentQueued.node.next))
-						} else if (queuedNode != null && queuedNode.appearsAfter(newTail)) {
-								log("another thread has advanced `queued` past the node I inserted");
-								return true;
-						} else {
-							// current chain may be new, and the enqueuer has not initialized queued yet
-							log("node and queued are not in the same chain; spinning until consistent");
-							LockSupport.parkNanos(100)
-						}
-					}
+					// couldn't reserve tail; retry
+					return dequeueIfSpace(stateRef.get)
 				}
+			} else {
+				return 0
+			}
+		} else {
+			return 0
+		}
+	}
+
+	@tailrec
+	private def doEnqueue(work: EnqueueableTask):Boolean = {
+		val logId = Log.scope("Executor.doEnqueue")
+		val state = stateRef.get
+		val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)
+		if (spaceAvailable > 0) {
+			// try inserting at `tail`
+			log(s"space may be available (${Ring.repr(state)})")
+			val numQueued = Ring.numQueued(state)
+			val numDequeue = Math.min(spaceAvailable, numQueued)
+			val numWork = if (spaceAvailable > numDequeue) 1 else 0
+			val nextState = ring.dequeueAndReserve(state, numDequeue, numWork)
+			if (stateRef.compareAndSet(state, nextState)) {
+				log(s"reserved ${numDequeue} dequeue and ${numWork} slots from ${Ring.tailIndex(state)}")
+				val prevTail = Ring.tailIndex(state)
+				val nextIdx = dequeueItemsInto(prevTail, numDequeue)
+				if (numWork == 0) {
+					startIfEmpty(state)
+					// gazumped by queued work; retry
+					return doEnqueue(work)
+				} else {
+					log(s"inserting work into $nextIdx")
+					ring.at(nextIdx).set(work)
+					startIfEmpty(state)
+					return true
+				}
+			} else {
+				// couldn't reserve tail; retry
+				return doEnqueue(work)
+			}
+		} else {
+			if (Ring.queueSpaceExhausted(state)) {
+				// I can't imagine this happening, but an exception seems
+				// better than corruption due to integer overflow.
+				throw new RuntimeException(
+					s"Overflow detected - ${Ring.MAX_QUEUED} items in a single SequentialState queue"
+				)
 			}
 
-			assert(false); false // unreachable
+			val nextState = Ring.incrementQueued(state)
+			if (stateRef.compareAndSet(state, nextState)) {
+				log(s"putting item in queue (${Ring.repr(nextState)})")
+				queue.add(work)
+				if (Ring.isStopped(nextState)) {
+					// We've just added a queued item to a stopped state.
+					// This can only mean that all slots are taken by futures
+					//
+					// To guard against futures completing and failing to enqueue
+					// further work, we ensure that there's _still_ no space
+					dequeueIfSpace(nextState)
+				}
+				return false
+			} else {
+				// CAS failed, try again
+				return doEnqueue(work)
+			}
 		}
 	}
 
-	trait WorkLoop extends Runnable {
-		def numInProgress: Int
-	}
-
-	private val self = this // for logging
-
-	val workLoop: WorkLoop = new WorkLoop() {
-		@volatile private var storedInProgress: List[Future[_]] = Nil
-
-		final def numInProgress = storedInProgress.length
-
+	// A runnable which reepeatedly consumes & runs items in
+	// the ring buffer until it's empty
+	val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
 			val logId = Log.scope("WorkLoop.run")
-			Log.log("begin")
-			val headNode = head.get
-			val inProgress = storedInProgress
-			runNodeRec(headNode, 200, headNode, inProgress)
+			log("begin")
+			loop(1000)
 		}
 
-		private def suspendWithInProgress(
-			headNode: Node[EnqueueableTask],
-			completedNode: Node[EnqueueableTask],
-			inProgress: List[Future[_]]
-		): Unit = {
-			val logId = Log.scope(self, "suspendWithInProgress")
-			log(s"suspending with ${inProgress.length}")
-			Future.firstCompletedOf[Any](inProgress).onComplete { _ =>
-				inProgress.partition(_.isCompleted) match {
-					case (Nil, inProgress) => assert(false)
-					case (completed, inProgress) => {
-						log(s"${completed.length} of ${inProgress.length} completed!")
-						advanceQueued(completed.length)
-						val headNode = head.get
-						val nextNode = advanceNode(headNode, completedNode, inProgress)
-						if (nextNode != null) {
-							runNodeRec(headNode, 200, nextNode, inProgress)
-						}
-					}
-				}
+		@tailrec
+		private def loop(_maxItems: Int): Unit = {
+			if (_maxItems <= 0) {
+				log("trampolining to prevent starvation")
+				return ec.execute(workLoop)
 			}
-		}
 
-		@tailrec private final def runNodeRec(
-			headNode: Node[EnqueueableTask],
-			numIterations: Int,
-			node: Node[EnqueueableTask],
-			inProgress: List[Future[_]]
-		) {
-			val logId = Log.scope(self, "runNodeRec")
-			if (numIterations > 0) {
-				val asyncCompletion = node.item.run()
-				asyncCompletion match {
+			val logId = Log.scope("WorkLoop.loop")
+			var state = stateRef.get
+			var currentHead = Ring.headIndex(state)
+			var maxItems = _maxItems
+
+			val currentTail = Ring.tailIndex(state)
+			val readyItems = ring.numItems(currentHead, currentTail)
+
+			// There must be something pending. Only this loop updates head, and
+			// it terminates if head becomes empty
+			// assert (!Ring.isStopped(state))
+
+			log(s"workLoop: ${Ring.repr(state)}, head = $currentHead, tail = $currentTail")
+			var fullyCompletedItems = 0
+			while (currentHead != currentTail) {
+				log(s"executing item @ $currentHead")
+				val slot = ring.at(currentHead)
+				var item = slot.get
+
+				while(item == null) {
+					// spin waiting for item to be set
+					item = slot.get
+				}
+
+				item.run().filter(!_.isCompleted) match {
 					case None => {
 						log("ran sync node")
-						completeNodes(1, node, inProgress) match {
-							case None => assert(false) // we can always advance 1 node
-							case Some(inProgress) => {
-								val next = advanceNode(headNode, node, inProgress)
-								if (next != null) {
-									runNodeRec(headNode, numIterations - 1, next, inProgress)
-								}
-							}
-						}
+						fullyCompletedItems = fullyCompletedItems + 1
 					}
 					case Some(f) => {
 						log("ran async node")
-						completeNodes(0, node, f :: inProgress) match {
-							case None => {
-								log("nothing to dequeue; suspending")
-								suspendWithInProgress(headNode, node, inProgress)
-							}
-							case Some(inProgress) => {
-								log("there are tasks ready to execute")
-								val next = advanceNode(headNode, node, inProgress)
-								if (next != null) {
-									runNodeRec(headNode, numIterations - 1, next, inProgress)
-								}
-							}
+						numFuturesRef.increment()
+						// now that we've incremented running futures, set it up to decrement on completion
+						f.onComplete { _ =>
+							numFuturesRef.decrement()
+							log(s"item completed asynchronously, there are now ${numFuturesRef.get} outstanding futures")
+							// try to dequeue. If there's no space available then either someone
+							// beat us to it, or there was a temporary burst of >bufLen async items
+							dequeueIfSpace(stateRef.get)
 						}
 					}
 				}
+
+				slot.set(null) // must be nulled before advancing
+				currentHead = ring.inc(currentHead)
+
+				// Try updating state, but don't worry if it fails
+				// TODO: we don't have to acknowledge every sync item, we could do it in a batch to save CAS operations.
+				state = advanceHeadTo(state, currentHead, fullyCompletedItems) match {
+					case Some(newState) => {
+						fullyCompletedItems = 0 // reset since these have been taken into account
+						newState
+					}
+					case None => stateRef.get
+				}
+
+				maxItems -= 1
+			}
+
+			// make sure we've definitely updated head:
+			while (Ring.headIndex(state) != currentHead) {
+				state = advanceHeadTo(state, currentHead, fullyCompletedItems) match {
+					case Some(newState) => newState
+					case None => stateRef.get
+				}
+			}
+
+			// state _must_ have been set to the most recent post-CAS result,
+			// so we can now use it to determine whether to stop
+			if (Ring.isStopped(state)) {
+				log(s"shutting down with state ${Ring.repr(state)} and ${numFuturesRef.get} pending futures")
+				return
 			} else {
-				log("ran 200 iterations; trampolining")
-				storedInProgress = inProgress
-				if (!head.compareAndSet(headNode, node)) {
-					throw new IllegalStateException("head modified by external thread")
-				}
-				ec.execute(workLoop)
+				// more work arrived, kepp going
+				return loop(maxItems)
 			}
 		}
 
-		// returns
-		// None => cannot continue; at capacity
-		// Some(list) => new inProgress list (with complete items removed)
-		private final def completeNodes(
-			completedSync: Int,
-			completed: Node[EnqueueableTask],
-			inProgress: List[Future[_]]): Option[List[Future[_]]] =
-		{
-			val logId = Log.scope(self, if (completedSync == 0) "completeNodesAsync" else "completeNotesSync")
-			@tailrec def tryUpdate():Option[List[Future[_]]] = {
-				val currentQueued = queued.get
-				inProgress.partition(_.isCompleted) match {
-					// Are some of these items already done?
-					case (Nil, inProgress) => {
-						// Nothing async has completed yet
-						if (completedSync != 0) {
-							log(s"advancing $completedSync sync item")
-							advanceQueued(completedSync)
-							Some(inProgress)
-						} else {
-							log("nothing async completed")
-							if (currentQueued.len == bufLen) {
-								log("we're at capacity (so nobody else will update queued)")
-								log("did we just run the final queued item?")
-								// We're at capacity. Did we just complete the final queued item?
-								if (currentQueued.node.eq(completed)) {
-									log("yes; returning None")
-									None
-								} else {
-									log("no, we have queued items. Returning unchanged inProgress")
-									Some(inProgress)
-								}
-							} else {
-								if (queued.compareAndSet(currentQueued, currentQueued)) {
-									log("...but we have space left in the queue")
-									Some(inProgress)
-								} else {
-									tryUpdate()
-								}
-							}
-						}
-					}
-					case (completed, inProgress) => {
-						log("we have some completed async items")
-						advanceQueued(completed.length + completedSync)
-						Some(inProgress)
-					}
+		def advanceHeadTo(state: State, head: Idx, minimumReclaimedSpaces: Int): Option[State] = {
+			// TODO: don't use option?
+
+			// we can't just dequeue as many items as we're advancing head by, since some of them
+			// may be "taken" by outstanding futures. So minimumReclaimedSpaces represents only
+			// the synchronous items that have completed.
+			val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get) + minimumReclaimedSpaces
+			val numQueued = Ring.numQueued(state)
+			val numDequeue = Math.min(spaceAvailable, numQueued)
+			val tail = Ring.tailIndex(state)
+			val newTail = if (numDequeue != 0) ring.add(tail, numDequeue) else tail
+			val newState = Ring.make(head, newTail, numQueued - numDequeue)
+			if (stateRef.compareAndSet(state, newState)) {
+				if (numDequeue > 0) {
+					dequeueItemsInto(Ring.tailIndex(state), numDequeue)
 				}
+				Some(newState)
+			} else {
+				None
 			}
-			tryUpdate()
-		}
-
-		private final def advanceNode(
-			headNode: Node[EnqueueableTask],
-			node: Node[EnqueueableTask],
-			inProgress: List[Future[_]]): Node[EnqueueableTask] =
-		{
-			val logId = Log.scope(self, "advanceNode")
-			var logNullifyTailAttempts = 0
-			val waitTime = 100
-			while (node.next == null) {
-				// looks like we've hit the tail.
-				logNullifyTailAttempts += 1
-				if(logNullifyTailAttempts>5) log("tail nullify attempts: " + logNullifyTailAttempts)
-
-				// The enqueueing thread of any final task will eventually
-				// update `queued` to include it (since there must be capacity).
-				// To prevent an inconsistent view of the world in `doEnqueue`,
-				// don't break this chain until queued matches tail.
-				val currentQueued = queued.get
-				if (currentQueued.node.eq(node)) {
-					// We need to save storedInProgress, as the next run could
-					// occur the moment we set `headNode` to null
-					storedInProgress = inProgress
-					if (tail.compareAndSet(node, null)) {
-						log(s"completed last item (${System.identityHashCode(node)}); storedInProgress has ${inProgress.length}")
-						head.compareAndSet(headNode, null) // best effort; helps with GC
-						return null
-					}
-				}
-				// We've interrupted an enqueuer thread -- either
-				// node.next is about to be populated, or queued still needs to
-				// be updated to include the final node in the chain.
-				//
-				// Either way, we just wait until that thread has progressed and try again.
-				LockSupport.parkNanos(waitTime)
-			}
-			log(s"advanced")
-			node.next
-		}
-
-		private final def advanceQueued(n: Int): Unit =
-		{
-			// n is always >0
-			val logId = Log.scope(self, s"advanceQueued($n)")
-			var logUpdatedCount = 0
-			@tailrec def tryUpdate(numCompleted: Int): Unit = {
-				logUpdatedCount += 1
-				if (logUpdatedCount > 5) log("runner queued update count: " + logUpdatedCount)
-				val currentQueued = queued.get
-				if (currentQueued.len == bufLen) {
-					// we're at capacity, only this thread can advance it (just use `set`)
-					val queuedNode = currentQueued.node
-					log(s"at capacity (queued = ${System.identityHashCode(queuedNode)}")
-
-					val nextQueued = queuedNode.next
-					if (nextQueued == null) {
-						log(s"no next; decrementing count to ${bufLen - numCompleted}")
-						val newQueued = new Queued(bufLen - numCompleted, queuedNode)
-						queued.update(newQueued)
-						val updatedNext = queuedNode.next
-						if (updatedNext != null) {
-							// race: we thought there was no next item, but it's been made
-							// non-null since we checked. We now have a `.next` node which
-							// is marked as not enqueued, but we have capacity for it.
-	
-							log("queuedNode.next was just modified, it may not have seen the free capacity")
-							if (queued.compareAndSet(newQueued, newQueued.add(updatedNext))) {
-								log(" - it is now enqueued")
-								updatedNext.item.enqueuedAsync()
-							} else {
-								// the above condition is self-righting if another enqueue() happens
-								log(" - nevermind; queued has been advanced already")
-							}
-						}
-						// if node.next was still null, then any future enqueues must not yet
-						// have checked `queued`; they will see the spare capacity
-					} else {
-						log(s"dequeueing next item (${System.identityHashCode(nextQueued)})")
-						queued.set(new Queued(bufLen, nextQueued))
-						// notify the lucky winner
-						nextQueued.item.enqueuedAsync()
-						val completedRemaining = numCompleted - 1
-						if (completedRemaining > 0) {
-							log(s"completing another $completedRemaining")
-							tryUpdate(completedRemaining)
-						}
-					}
-				} else {
-					// We're not at capacity. If threads enqueue more tasks in the meantime
-					// this CAS will fail and we'll loop again
-					if (!queued.compareAndSet(currentQueued, currentQueued)) {
-						tryUpdate(numCompleted)
-					}
-				}
-			}
-			tryUpdate(n)
 		}
 	}
 }

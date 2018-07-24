@@ -223,7 +223,6 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			if (spaceAvailable > 0) {
 				// try inserting at `tail`
 				log(s"space may be available (${Ring.repr(state)})")
-				val numQueued = Ring.numQueued(state)
 				val numDequeue = Math.min(spaceAvailable, numQueued)
 				val nextState = ring.dequeueAndReserve(state, numDequeue, 0)
 				if (stateRef.compareAndSet(state, nextState)) {

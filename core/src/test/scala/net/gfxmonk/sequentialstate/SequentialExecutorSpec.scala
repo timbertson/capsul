@@ -197,20 +197,20 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 			assert(count.current == 4)
 		}
 
-		it("executes up to 200 jobs in a single loop") {
+		it("executes up to 1000 jobs in a single loop") {
 			val ctx = Ctx.withThreadPool(bufLen = 50); import ctx._
 
-			awaitAll(List.fill(200)(ex.enqueue(inc(sleep=1))))
+			awaitAll(List.fill(1000)(ex.enqueue(inc(sleep=1))))
 			assert(queuedRunLoops.length == 1)
-			assert(count.current == 200)
+			assert(count.current == 1000)
 		}
 
-		it("defers jobs into a new loop after 200 (rounded to batch size) to prevent starvation") {
+		it("defers jobs into a new loop after 1000 (rounded to batch size) to prevent starvation") {
 			val ctx = Ctx.withThreadPool(bufLen = 50); import ctx._
 
-			awaitAll(List.fill(250)(ex.enqueue(inc(sleep=1))))
+			awaitAll(List.fill(1050)(ex.enqueue(inc(sleep=1))))
 			assert(queuedRunLoops.length == 2)
-			assert(count.current == 250)
+			assert(count.current == 1050)
 		}
 	}
 

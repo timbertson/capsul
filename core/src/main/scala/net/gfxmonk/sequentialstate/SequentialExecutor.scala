@@ -41,6 +41,22 @@ class RingItem[T>:Null<:AnyRef] {
  * We can get away with not tying numFutures into state, because it's advisory. If we run ahead / behind a little bit, it doesn't matter because
  * it doesn't affect correctness.
  */
+
+
+/*
+ * Idea:
+ *
+ * Split head & tail.
+ *
+ * head
+ * tail | running | numQueued
+ *
+ * head being unhinged from tail is probably fine.
+ * tail & isRunning must be tied, since otherwise we can't be sure we're running after inserting work.
+ * only work advances head, and to do so it pops numQueued / advances tail. So this requires 2 CASes.
+ *
+ */
+
 object Ring {
 	type Count = Int
 	type Idx = Int
@@ -62,31 +78,33 @@ object Ring {
 
 
 	// ------------------------------------------------
-	// // # Simple implementation, for debugging
-	// type State = (Int, Int, Int)
-	// type AtomicState = AtomicAny[State]
-	// def make(head: Idx, tail: Idx, numQueued: Count) = {
-	// 	(head, tail, numQueued)
-	// }
-	// def headIndex(t:State):Idx = t._1
-	// def tailIndex(t:State):Idx = t._2
-	// def numQueued(t:State):Count = t._3
-	// def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
+	// # Simple implementation, for debugging
+	type Head = Int
+	type Tail = (Boolean, Int, Int)
+	type State = Tail // temp, for typing convenience
+	type AtomicTail = AtomicAny[Tail]
+	def make(head: Idx, tail: Idx, numQueued: Count) = {
+		(head, tail, numQueued)
+	}
+	def headIndex(t:State):Idx = t._1
+	def tailIndex(t:State):Idx = t._2
+	def numQueued(t:State):Count = t._3
+	def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
 	// ------------------------------------------------
 	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
-	type State = Long
-	type AtomicState = AtomicLong
-	private val HEAD_OFFSET = 48 // 64 - 16
-	private val TAIL_OFFSET = 32 // 64 - (2*16)
-	private val IDX_MASK = 0xffff // 2 bytes (16 bits)
-	private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
-	def make(head: Idx, tail: Idx, numQueued: Count) = {
-		(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
-	}
-	def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
-	def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
-	def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
-	def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
+	// type State = Long
+	// type AtomicState = AtomicLong
+	// private val HEAD_OFFSET = 48 // 64 - 16
+	// private val TAIL_OFFSET = 32 // 64 - (2*16)
+	// private val IDX_MASK = 0xffff // 2 bytes (16 bits)
+	// private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
+	// def make(head: Idx, tail: Idx, numQueued: Count) = {
+	// 	(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
+	// }
+	// def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
+	// def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
+	// def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
+	// def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
 	// ------------------------------------------------
 
 }
@@ -133,10 +151,12 @@ class Ring[T >: Null <: AnyRef](size: Int) {
 		}
 	}
 
-	def spaceAvailable(s: State, numFutures: Int):Int = {
-		val space = size - numItems(Ring.headIndex(s), Ring.tailIndex(s)) - numFutures
-		// Note: numFuturesRef is not synchronized with the rest of state; it may be inaccurate
-		// (causing a negative space value)
+	def spaceAvailable(s: State, head: Int, numFutures: Int):Int = {
+		val space = size - numItems(head, Ring.tailIndex(s)) - numFutures
+		// Note: numFuturesRef and head are both not synchronized with the rest of state;
+		// so we may have a skewed view.
+		// This is used to CAS on tail, so as long as head
+		// is behind, this is a safe estimate (it can only be under, not over).
 		if (space < 0) {
 			0
 		} else {
@@ -146,9 +166,8 @@ class Ring[T >: Null <: AnyRef](size: Int) {
 
 	def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int): State = {
 		// dequeue up to numDequeue & reserve up to (numDequeue + numWork) ring slots
-		val head = headIndex(t)
 		val tail = tailIndex(t)
-		make(head, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
+		make(true, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
 	}
 }
 
@@ -161,7 +180,8 @@ object SequentialExecutor {
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val ring = new Ring[EnqueueableTask](bufLen)
 	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
-	private val stateRef:Ring.AtomicState = Atomic(Ring.make(0,0,0))
+	private val stateRef:Ring.AtomicState = Atomic(Ring.make(false,0,0))
+	private val headRef:Ring.AtomicInt = Atomic(0)
 	private val numFuturesRef:AtomicInt = Atomic(0)
 
 	import Log.log
@@ -215,14 +235,17 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	@tailrec
-	private def dequeueIfSpace(state: State): Int = {
+	private def dequeueIfSpace(state: State, head: Idx): Int = {
+		// NOTE: may not completely fill ring even when there
+		// are many items queued, since `head` may advance
+		// during execution
 		val logId = Log.scope("dequeueIfSpace")
 		val numQueued = Ring.numQueued(state)
 		if (numQueued > 0) {
-			val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)
+			val spaceAvailable = ring.spaceAvailable(state, head, numFuturesRef.get)
 			if (spaceAvailable > 0) {
 				// try inserting at `tail`
-				log(s"space may be available (${Ring.repr(state)})")
+				log(s"space may be available ($head, ${Ring.repr(state)})")
 				val numDequeue = Math.min(spaceAvailable, numQueued)
 				val nextState = ring.dequeueAndReserve(state, numDequeue, 0)
 				if (stateRef.compareAndSet(state, nextState)) {
@@ -234,7 +257,8 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					return numDequeue
 				} else {
 					// couldn't reserve tail; retry
-					return dequeueIfSpace(stateRef.get)
+					// TODO should we re-fetch head first?
+					return dequeueIfSpace(stateRef.get, head)
 				}
 			} else {
 				return 0

@@ -28,7 +28,7 @@ object SequentialExecutorSpec {
 	class Ctx(bufLen: Int, val ec: InspectableExecutionContext) {
 		implicit val executionContext: ExecutionContext = ec
 		var count = new Ctx.Count
-		val ex = new SequentialExecutor(bufLen)
+		val ex = new SequentialExecutor(bufLen)(ec)
 		var promises = new mutable.Queue[Promise[Unit]]()
 
 		def awaitAll[A](futures: List[Future[A]], seconds:Int = 10) =
@@ -143,12 +143,13 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 
 	override def withFixture(test: NoArgTest): Outcome = {
 		logsDumped = false
+		Log.clear()
 		val result = super.withFixture(test)
 		result match {
 			case Failed(_) | Canceled(_) => {
 				dumpLogs(info.apply)
 			}
-			case _ => ()
+			case other => ()
 		}
 		result
 	}
@@ -205,13 +206,13 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 			assert(count.current == 1000)
 		}
 
-		it("defers jobs into a new loop after 1000 (rounded to batch size) to prevent starvation") {
-			val ctx = Ctx.withThreadPool(bufLen = 50); import ctx._
-
-			awaitAll(List.fill(1050)(ex.enqueue(inc(sleep=1))))
-			assert(queuedRunLoops.length == 2)
-			assert(count.current == 1050)
-		}
+		// it("defers jobs into a new loop after 1000 (rounded to batch size) to prevent starvation") {
+		// 	val ctx = Ctx.withThreadPool(bufLen = 50); import ctx._
+    //
+		// 	awaitAll(List.fill(1050)(ex.enqueue(inc(sleep=1))))
+		// 	assert(queuedRunLoops.length == 2)
+		// 	assert(count.current == 1050)
+		// }
 	}
 
 	describe("async tasks") {

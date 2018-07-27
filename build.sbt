@@ -35,7 +35,7 @@ lazy val core = (project in file("core")).settings(
   commonSettings,
   libraryDependencies += scalaReflect,
   name := "sequentialstate"
-).dependsOn(log % "compile-internal")
+).dependsOn(log)
 
 lazy val perf = (project in file("perf")).settings(
   hiddenProject,

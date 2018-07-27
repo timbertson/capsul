@@ -15,9 +15,9 @@ class RingSpec extends FunSpec {
 	val maxIndex = 19
 	val validIndices = (minIndex to maxIndex).toList
 	val validSizes = (minIndex to size).toList
-	def emptyState(idx: Int = 0) = Ring.make(idx, idx, 0)
-	def fullState(idx: Int = 0) = Ring.make(idx, idx, 0)
-	def withItems(idx: Int, n: Int) = Ring.make(idx, ring.add(idx, n), 0)
+	def emptyState(idx: Int = 0) = Ring.make(false, idx, 0)
+	def fullState(idx: Int = 0) = Ring.make(true, idx, 0)
+	def withItems(idx: Int, n: Int) = Ring.make(n != 0, ring.add(idx, n), 0)
 
 	// we're only testing pure functions on ring, so we can reuse an instance
 	val ring = new Ring(size)
@@ -38,9 +38,9 @@ class RingSpec extends FunSpec {
 	describe("make & repr") {
 		it("acts like a simple tuple") {
 			val examples = List(
-				(0,0,0),
-				(1,1,1),
-				(1,2,3)
+				(false,0,0),
+				(false,1,1),
+				(true,2,3)
 			)
 			examples.map { case (a,b,c) =>
 				assert(Ring.repr(Ring.make(a,b,c)) == (a,b,c))
@@ -84,7 +84,7 @@ class RingSpec extends FunSpec {
 		foreachIndexIt("returns the number of items in the ring") { i =>
 			validSizes.foreach { n =>
 				val state = withItems(i, n)
-				val result = ring.numItems(Ring.headIndex(state), Ring.tailIndex(state))
+				val result = ring.numItems(i, Ring.tailIndex(state))
 				assert(result == n, s"- ring $state with size $n")
 			}
 		}
@@ -94,25 +94,21 @@ class RingSpec extends FunSpec {
 		foreachIndexIt("returns the space available") { i =>
 			validSizes.foreach { n =>
 				val state = withItems(i, n)
-				val result = ring.spaceAvailable(state, 0)
+				val result = ring.spaceAvailable(state, i, 0)
 				assert(result == size - n, s"- ring $state with size $n")
 			}
 		}
 
 		it("returns 0 if there are equal (or more) futures than spaces") {
-			assert(ring.spaceAvailable(withItems(0, 5), 5) == 0)
-			assert(ring.spaceAvailable(withItems(0, 5), 10) == 0)
+			assert(ring.spaceAvailable(withItems(0, 5), 0, 5) == 0)
+			assert(ring.spaceAvailable(withItems(0, 5), 0, 10) == 0)
 		}
 	}
 
 	describe("dequeueAndReserve") {
-		val state = Ring.make(0, 2, 5)
+		val state = Ring.make(true, 2, 5)
 		val newState = ring.dequeueAndReserve(state, 3, 1)
 
-		it("leaves head unchanged") {
-			assert(Ring.headIndex(state) == 0)
-			assert(Ring.headIndex(newState) == 0)
-		}
 		it("extends tail by queued+work") {
 			assert(Ring.tailIndex(state) == 2)
 			assert(Ring.tailIndex(newState) == 6)
@@ -125,18 +121,8 @@ class RingSpec extends FunSpec {
 
 	describe("incrementQueued") {
 		it("increments queued value") {
-			val state = Ring.make(1, 2, 3)
-			assert(Ring.incrementQueued(state) == Ring.make(1,2,4))
-		}
-	}
-
-	describe("isStopped") {
-		foreachIndexIt("is true iff the ring is empty") { i =>
-			assert(Ring.isStopped(emptyState(i)) == true)
-			validSizes.foreach { n =>
-				val expected = n == 0
-				assert(Ring.isStopped(withItems(i, n)) == expected)
-			}
+			val state = Ring.make(true, 2, 3)
+			assert(Ring.incrementQueued(state) == Ring.make(true,2,4))
 		}
 	}
 }

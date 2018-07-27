@@ -198,8 +198,8 @@ object Log {
 
 		def makeId(obj: Any, desc: String) = {
 			nextId += 1
-			val id = if (obj == null) nextId else s"${System.identityHashCode(obj)}.$nextId"
-			new LogCtx(s"$desc@$id", Log.threadBuffer)
+			val id = if (obj == null) nextId else s"${System.identityHashCode(obj).toHexString}.$nextId"
+			new LogCtx(s"$id/$desc", Log.threadBuffer)
 		}
 
 		def makeId(desc: String) = {

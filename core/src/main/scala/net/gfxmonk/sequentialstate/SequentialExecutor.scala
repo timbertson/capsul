@@ -4,6 +4,7 @@ import java.util.concurrent.locks.LockSupport
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.annotation.tailrec
 import net.gfxmonk.sequentialstate.internal.Log
+import net.gfxmonk.sequentialstate.internal.Log.log
 
 import monix.execution.atomic._
 
@@ -13,11 +14,15 @@ import scala.concurrent.{ExecutionContext, Future}
 class RingItem[T>:Null<:AnyRef] {
 	@volatile private var contents:T = null
 	def set(item:T) {
+		// val logId = Log.scope(this, "slot")
+		// log(s"set($item)")
 		contents = item
 	}
 
 	def get: T = {
-		contents
+		val ret = contents
+		// log(s"get = $ret")
+		ret
 	}
 }
 
@@ -62,7 +67,7 @@ object Ring {
 	type Idx = Int
 
 	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
-	val MAX_QUEUED = 500 // Math.pow(2, (8 * 4) - 1) // TODO: CHECK
+	val MAX_QUEUED = 10000 // Math.pow(2, (8 * 4) - 1) // TODO: CHECK
 	val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
 	def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
 
@@ -184,10 +189,6 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	// don't advance until you've freed up this many slots
 	private val advanceMinThreshold = Math.max(3, bufLen / 4)
 
-	// ...and don't advance if there's more than this many slots free already
-	private val advanceMaxSpaceAvailable = Math.max(3, bufLen / 4)
-
-	import Log.log
 	import Ring._
 
 	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
@@ -211,7 +212,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	private def dequeueItemsInto(dest: Idx, numItems: Int): Idx = {
-		val logId = Log.scope(s"dequeueItemsInto($dest, $numItems)")
+		val logId = Log.scope(this, s"dequeueItemsInto($dest, $numItems)")
 		var idx = dest
 		var n = numItems
 		while(n > 0) {
@@ -224,6 +225,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			}
 			log(s"dequeued item for index $idx")
 			ring.at(idx).set(queued)
+			log(s"ring.at($idx).set($queued)")
 			queued.enqueuedAsync()
 			idx = ring.inc(idx)
 			n -= 1
@@ -232,7 +234,9 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	private def startIfStopped(prevState: State) {
+		val logId = Log.scope(this, "startIfStopped")
 		if (Ring.isStopped(prevState)) {
+			log("starting workLoop")
 			ec.execute(workLoop)
 		}
 	}
@@ -242,7 +246,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		// NOTE: may not completely fill ring even when there
 		// are many items queued, since `head` may advance
 		// during execution
-		val logId = Log.scope("dequeueIfSpace")
+		val logId = Log.scope(this, "dequeueIfSpace")
 		val numQueued = Ring.numQueued(state)
 		if (numQueued > 0) {
 			val spaceAvailable = ring.spaceAvailable(state, head, numFuturesRef.get)
@@ -268,14 +272,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 	@tailrec
 	private def doEnqueue(work: EnqueueableTask):Boolean = {
-		val logId = Log.scope("Executor.doEnqueue")
+		val logId = Log.scope(this, "Executor.doEnqueue")
 		val state = stateRef.get
 		val storedNumFutures = numFuturesRef.get
 		val head = headRef.get
 		val spaceAvailable = ring.spaceAvailable(state, head, storedNumFutures)
 		if (spaceAvailable > 0) {
 			// try inserting at `tail`
-			log(s"space may be available ($head, ${Ring.repr(state)})")
+			log(s"$spaceAvailable slots may may be available ($head, ${Ring.repr(state)}, $storedNumFutures)")
 			val numQueued = Ring.numQueued(state)
 			val numDequeue = Math.min(spaceAvailable, numQueued)
 			val numWork = if (spaceAvailable > numDequeue) 1 else 0
@@ -329,16 +333,17 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 	// A runnable which reepeatedly consumes & runs items in
 	// the ring buffer until it's empty
+	private val self = this
 	val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
-			val logId = Log.scope("WorkLoop.run")
+			val logId = Log.scope(self, "WorkLoop")
 			log("begin")
 			loop(1000)
 		}
 
 		@tailrec
 		private def loop(_maxItems: Int): Unit = {
-			val logId = Log.scope("WorkLoop.loop")
+			val logId = Log.scope(self, "WorkLoop")
 			if (_maxItems <= 0) {
 				log("trampolining to prevent starvation")
 				return ec.execute(workLoop)
@@ -363,10 +368,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				val slot = ring.at(currentHead)
 				var item = slot.get
 
-				while(item == null) {
+				var maxSpins = 500 // XXX remove
+				while(item == null && maxSpins > 0) {
 					// spin waiting for item to be set
+					log(s"spin #$maxSpins for $currentHead -- $item -- $slot....")
+					maxSpins -= 1
 					item = slot.get
 				}
+				if(item == null) throw new RuntimeException("maxSpins expired!")
 
 				item.run().filter(!_.isCompleted) match {
 					case None => {
@@ -375,6 +384,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 					case Some(f) => {
 						log("ran async node")
+						numFuturesRef.increment()
 						// now that we've incremented running futures, set it up to decrement on completion
 						f.onComplete { _ =>
 							numFuturesRef.decrement()
@@ -386,17 +396,19 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 				}
 
-				slot.set(null) // must be nulled before advancing
+				// log(s"setting slot @ $currentHead to null")
+				slot.set(null) // must be nulled before advancing head
 				currentHead = ring.inc(currentHead)
 
 				if (fullyCompletedItems > advanceMinThreshold) {
-					state = tryAdvanceHeadTo(state, currentHead, fullyCompletedItems) match {
+					state = stateRef.get
+					state = tryAdvanceHeadTo(state, storedHead, currentHead, fullyCompletedItems) match {
 						case Some(newState) => {
 							fullyCompletedItems = 0
 							storedHead = currentHead
 							newState
 						}
-						case None => stateRef.get
+						case None => state
 					}
 				}
 
@@ -405,7 +417,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 			// after a loop, ensure head is up to date:
 			if(storedHead != currentHead) {
-				state = advanceHeadTo(state, currentHead, fullyCompletedItems)
+				state = advanceHeadTo(state, storedHead, currentHead, fullyCompletedItems)
 			}
 
 			// state _must_ have been set to the most recent post-CAS result,
@@ -420,31 +432,31 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 
 		@tailrec
-		def advanceHeadTo(state: State, head: Idx, minimumReclaimedSpaces: Int): State = {
-			tryAdvanceHeadTo(state, head, minimumReclaimedSpaces) match {
+		def advanceHeadTo(state: State, storedHead: Idx, newHead: Idx, minimumReclaimedSpaces: Int): State = {
+			tryAdvanceHeadTo(state, storedHead, newHead, minimumReclaimedSpaces) match {
 				case Some(newState) => newState
-				case None => advanceHeadTo(stateRef.get, head, minimumReclaimedSpaces)
+				case None => advanceHeadTo(stateRef.get, storedHead, newHead, minimumReclaimedSpaces)
 			}
 		}
 
-		def tryAdvanceHeadTo(state: State, head: Idx, minimumReclaimedSpaces: Int): Option[State] = {
+		def tryAdvanceHeadTo(state: State, storedHead: Idx, newHead: Idx, minimumReclaimedSpaces: Int): Option[State] = {
 			// we can't just dequeue as many items as we're advancing head by, since some of them
 			// may be "taken" by outstanding futures. So minimumReclaimedSpaces represents only
 			// the synchronous items that have completed.
-			val logId = Log.scope("tryAdvanceHeadTo")
-			val spaceAvailable = ring.spaceAvailable(state, head, numFuturesRef.get) + minimumReclaimedSpaces
+			val logId = Log.scope(self, "tryAdvanceHeadTo")
+			val spaceAvailable = ring.spaceAvailable(state, storedHead, numFuturesRef.get) + minimumReclaimedSpaces
 			val numQueued = Ring.numQueued(state)
 			val numDequeue = Math.min(spaceAvailable, numQueued)
 			val tail = Ring.tailIndex(state)
 			val newTail = if (numDequeue != 0) ring.add(tail, numDequeue) else tail
-			val newRunning = tail != head
+			val newRunning = tail != newHead
 			val newState = Ring.make(newRunning, newTail, numQueued - numDequeue)
 			if (stateRef.compareAndSet(state, newState)) {
 				if (numDequeue > 0) {
 					dequeueItemsInto(Ring.tailIndex(state), numDequeue)
 				}
-				headRef.set(head)
-				log(s"Setting head to new value $head with state ${Ring.repr(state)}")
+				headRef.set(newHead)
+				log(s"setting head to new value $newHead with state ${Ring.repr(newState)}")
 				Some(newState)
 			} else {
 				None

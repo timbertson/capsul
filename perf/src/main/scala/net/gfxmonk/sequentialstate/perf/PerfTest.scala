@@ -216,10 +216,10 @@ class PipelineStage[T,R](
 	import Log.log
 	import PipelineStage._
 	val stateRef = SequentialState(v = new State[R](), bufLen = bufLen)
-	val logId = Log.scope(s"PipelineStage-${index}")
 
 	private def onItemCompleted(item: Any): Future[Unit] = {
 		// need to re-access state
+		val logId = Log.scope(s"PipelineStage-${index}")
 		log(s"onItemCompleted($item); enqueueing access")
 		stateRef.sendAccessAsync { state =>
 			drainExistingItems(state, true).getOrElse(completedFuture)
@@ -227,6 +227,7 @@ class PipelineStage[T,R](
 	}
 
 	def drainExistingItems(state: State[R], haveReadyItem: Boolean): Option[Future[Unit]] = {
+		val logId = Log.scope(s"PipelineStage-${index}")
 		log("drainExistingItems")
 		state.outgoing = state.outgoing.filter(!_.isCompleted) match {
 			case Some(outgoing) => {
@@ -265,8 +266,10 @@ class PipelineStage[T,R](
 	}
 
 	def enqueue(item: T):Future[Unit] = {
+		val logId = Log.scope(s"PipelineStage-${index}")
 		log(s"enqueueing ${item}")
 		stateRef.sendAccessAsync { state =>
+			val logId = Log.scope(s"PipelineStage-${index}")
 			log(s"manipulating state for ${item}")
 			// val promise = Promise[Unit]()
 			val processedItem = process(item)
@@ -287,7 +290,6 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 	import Log.log
 	val threadPool = PerfTest.makeThreadPool(conf.parallelism)
 	val workEc = ExecutionContext.fromExecutor(threadPool)
-	val logId = Log.scope(s"Pipeline")
 	def add(item: Int) = {
 		Sleep.jittered(conf.timePerStep, conf.jitter)
 		item + 1
@@ -299,8 +301,10 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 		val sink = SequentialState(0, bufLen = conf.bufLen)
 		val drained = Promise[Int]()
 		def finalize(item: Option[Int]): Future[Unit] = {
+			val logId = Log.scope(s"Pipeline")
 			item match {
 				case Some(item) => sink.sendTransform { current =>
+					val logId = Log.scope(s"Pipeline")
 					val sum = current + item
 					log(s"size = ${sum} after adding $item to $current")
 					sum
@@ -326,7 +330,6 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 			sink: Function[Option[Int], Future[Unit]],
 			stages: Int):Function[Option[Int], Future[Unit]] =
 		{
-			val logId = Log.scope(s"connect[$stages]")
 			val stage = new PipelineStage(stages, conf.bufLen, process, sink)
 			if (stages == 1) {
 				stage.enqueue
@@ -337,6 +340,7 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 
 		val fullPipeline = connect(finalize, conf.stages)
 		def pushWork():Future[Unit] = {
+			val logId = Log.scope(s"Pipeline")
 			if (source.hasNext) {
 				val item = source.next
 				log(s"pushWork: begin item $item")
@@ -387,11 +391,13 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 
 		val source: Source[Int, NotUsed] = Source.fromIterator(sourceIterator)
 		val sink = Sink.fold[Int,Int](0) { (i, token) =>
+			val logId = Log.scope(s"runAkkaStreams")
 			log(s"accumulating $i + $token")
 			i + token
 		}
 
 		def process(item: Int):Future[Int] = {
+			val logId = Log.scope(s"runAkkaStreams")
 			log(s"begin processing item $item")
 			Future(add(item))(workEc)
 		}
@@ -418,13 +424,20 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 }
 
 object PerfTest {
-	val bufLen = 50
+	def main(): Unit = {
+		new PerfTest().main()
+	}
+
 	def makeThreadPool(parallelism: Int) = {
 		// Executors.newFixedThreadPool(parallelism)
 		new ForkJoinPool(parallelism)
 	}
+}
 
-	val threadPool = makeThreadPool(4)
+class PerfTest {
+	val bufLen = 50
+
+	val threadPool = PerfTest.makeThreadPool(4)
 	implicit val ec = ExecutionContext.fromExecutor(threadPool)
 	// val globalEc = scala.concurrent.ExecutionContext.Implicits.global
 	def makeLines(n:Int=500) = Iterator.continually {
@@ -472,13 +485,15 @@ object PerfTest {
 		val start = System.currentTimeMillis()
 		val f = impl
 		val result = Try {
-			Await.result(f(), Duration(1, TimeUnit.SECONDS))
+			// Await.result(f(), Duration(2, TimeUnit.SECONDS))
+			Await.result(f(), Duration(6, TimeUnit.SECONDS))
 			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {
 			Log("** failed **")
 			Log.dump()
 			println(result)
+			System.exit(1)
 			throw new RuntimeException("failed") // uncomment for early-exit
 		}
 		val end = System.currentTimeMillis()
@@ -514,7 +529,8 @@ object PerfTest {
 	}
 
 	def main(): Unit = {
-		val repeat = this.repeat(50, warmups=50) _
+		val repeat = this.repeat(500, warmups=100) _
+		// val repeat = this.repeat(10, warmups=0) _
 		val countLimit = 10000
 		val largePipeline = PipelineConfig(
 			stages = 10,
@@ -544,7 +560,7 @@ object PerfTest {
 		}
 
 		repeat("counter", List(
-			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
+			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit * 10, bufLen = bufLen)),
 			"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
 			"Akka counter" -> (() => CounterActor.run(countLimit)),
 			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
@@ -568,9 +584,12 @@ object PerfTest {
 
 object LongLivedLoop {
 	def main(): Unit = {
-		val threadPool = PerfTest.makeThreadPool(4)
-		implicit val ec = ExecutionContext.fromExecutor(threadPool)
-		Await.result(CounterState.run(Int.MaxValue, bufLen = PerfTest.bufLen), Duration.Inf)
+		// val threadPool = PerfTest.makeThreadPool(4)
+		// implicit val ec = ExecutionContext.fromExecutor(threadPool)
+		// Await.result(CounterState.run(Int.MaxValue, bufLen = PerfTest.bufLen), Duration.Inf)
+		while(true) {
+			PerfTest.main()
+		}
 	}
 }
 

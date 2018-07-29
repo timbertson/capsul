@@ -20,15 +20,17 @@ object Log {
 	// val ENABLE = true; type Ctx = LogCtx
 	val ENABLE = false; type Ctx = Unit
 
+	val MAX_LOG_LINES = 1000
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
-	class MutableRef[T](initialValue: T) {
-		@volatile private var item: T = initialValue
+	class MutableRef[T](val generation: Int, initialValue: T) {
+		private var item: T = initialValue
 		def set(t: T) { item = t }
 		def get: T = { item }
 	}
 	type LogBuffer = MutableRef[Queue[LogEntry]]
 
+	@volatile private var generation: Int = 0
 	private lazy val threads = {
 		if (!ENABLE) {
 			throw new RuntimeException(
@@ -39,15 +41,31 @@ object Log {
 		new ConcurrentHashMap[Long, LogBuffer]()
 	}
 
-	def threadBuffer = {
-		val id = Thread.currentThread().getId()
-		Option(threads.get(id)) match {
-			case None => {
-				val buf: LogBuffer = new MutableRef(Queue[LogEntry]())
-				threads.putIfAbsent(id, buf)
-				threads.get(id)
+	def clear() {
+		ifEnabled {
+			threads.synchronized {
+				generation += 1
+				threads.clear()
 			}
-			case Some(buf) => buf
+		}
+	}
+
+	private val threadLocal = ThreadLocal.withInitial[Option[MutableRef[Queue[LogEntry]]]](() => None)
+
+	def threadBuffer = {
+		val currentGeneration = generation
+		threadLocal.get.filter(_.generation == currentGeneration).getOrElse {
+			val id = Thread.currentThread().getId()
+			val buf = Option(threads.get(id)) match {
+				case None => {
+					val buf: LogBuffer = new MutableRef(currentGeneration, Queue[LogEntry]())
+					threads.putIfAbsent(id, buf)
+					threads.get(id)
+				}
+				case Some(buf) => buf
+			}
+			threadLocal.set(Some(buf))
+			buf
 		}
 	}
 
@@ -59,14 +77,6 @@ object Log {
 
 	private def ifEnabled(x: => Unit) {
 		if (ENABLE) x
-	}
-
-	def clear() {
-		ifEnabled {
-			threads.synchronized {
-				threads.clear()
-			}
-		}
 	}
 
 	def apply(msg: String): Unit = macro Macros.applyImpl
@@ -104,8 +114,13 @@ object Log {
 			try {
 				val buffers = threads.entrySet().asScala.map { case entry =>
 					val tid = entry.getKey
-					val logs = entry.getValue
-					logs.get.map(log => (tid,log))
+					var logs = entry.getValue.get
+					if (logs.size == MAX_LOG_LINES) {
+						// insert a marker so we can tell that there may have been clipping
+						val ts = logs.head._1
+						logs = (ts, s"** Thread $tid logs begin **") +: logs
+					}
+					logs.map(log => (tid,log))
 				}
 				val merged = buffers.foldLeft(Array[ThreadLogEntry]()) { (acc, lst) =>
 					// sort by timestamp
@@ -190,7 +205,7 @@ object Log {
 		def doLog(buf: LogBuffer, s: String) {
 			val time = System.nanoTime()
 			var queue = buf.get.enqueue(time -> s)
-			if (queue.length > 1000) {
+			if (queue.length > MAX_LOG_LINES) {
 				queue = queue.dequeue._2
 			}
 			buf.set(queue)
@@ -198,8 +213,8 @@ object Log {
 
 		def makeId(obj: Any, desc: String) = {
 			nextId += 1
-			val id = if (obj == null) nextId else s"${System.identityHashCode(obj)}.$nextId"
-			new LogCtx(s"$desc@$id", Log.threadBuffer)
+			val id = if (obj == null) nextId else s"${System.identityHashCode(obj).toHexString}.$nextId"
+			new LogCtx(s"$id/$desc", Log.threadBuffer)
 		}
 
 		def makeId(desc: String) = {

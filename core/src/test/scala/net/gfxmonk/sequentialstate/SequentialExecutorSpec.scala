@@ -28,7 +28,7 @@ object SequentialExecutorSpec {
 	class Ctx(bufLen: Int, val ec: InspectableExecutionContext) {
 		implicit val executionContext: ExecutionContext = ec
 		var count = new Ctx.Count
-		val ex = new SequentialExecutor(bufLen)
+		val ex = new SequentialExecutor(bufLen)(ec)
 		var promises = new mutable.Queue[Promise[Unit]]()
 
 		def awaitAll[A](futures: List[Future[A]], seconds:Int = 10) =
@@ -143,12 +143,13 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 
 	override def withFixture(test: NoArgTest): Outcome = {
 		logsDumped = false
+		Log.clear()
 		val result = super.withFixture(test)
 		result match {
 			case Failed(_) | Canceled(_) => {
 				dumpLogs(info.apply)
 			}
-			case _ => ()
+			case other => ()
 		}
 		result
 	}

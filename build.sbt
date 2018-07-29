@@ -2,6 +2,8 @@
 
 val scalaVer = "2.12.1"
 
+scalaVersion in ThisBuild := scalaVer
+
 val monixVersion = "2.3.0"
 
 val akkaVersion = "2.5.3"
@@ -9,7 +11,6 @@ val akkaVersion = "2.5.3"
 val scalaReflect = "org.scala-lang" % "scala-reflect" % scalaVer
 
 val commonSettings = Seq(
-  scalaVersion := scalaVer,
   organization := "net.gfxmonk",
   name := "sequentialstate",
   description := "Minimal, thread-safe state encapsulation",
@@ -18,6 +19,8 @@ val commonSettings = Seq(
   libraryDependencies += "io.monix" %% "monix-execution" % monixVersion,
   libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
 )
+
+enablePlugins(JCStressPlugin)
 
 val hiddenProject = commonSettings ++ Seq(
   publish := {},
@@ -35,13 +38,19 @@ lazy val core = (project in file("core")).settings(
   commonSettings,
   libraryDependencies += scalaReflect,
   name := "sequentialstate"
-).dependsOn(log % "compile-internal")
+).dependsOn(log)
 
 lazy val perf = (project in file("perf")).settings(
   hiddenProject,
   libraryDependencies += "io.monix" %% "monix" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "sequentialstate-perf"
+).dependsOn(core).dependsOn(log)
+
+lazy val stress = (project in file("stress")).settings(
+  hiddenProject,
+  version in Jcstress := "0.4",
+  name := "sequentialstate-stress"
 ).dependsOn(core).dependsOn(log)
 
 lazy val examples = (project in file("examples")).settings(

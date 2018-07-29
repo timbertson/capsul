@@ -529,8 +529,8 @@ class PerfTest {
 	}
 
 	def main(): Unit = {
-		// val repeat = this.repeat(50, warmups=50) _
-		val repeat = this.repeat(10, warmups=0) _
+		val repeat = this.repeat(500, warmups=100) _
+		// val repeat = this.repeat(10, warmups=0) _
 		val countLimit = 10000
 		val largePipeline = PipelineConfig(
 			stages = 10,

@@ -77,6 +77,7 @@ class RingItem[T>:Null<:AnyRef] {
 object Ring {
 	type Count = Int
 	type Idx = Int
+	type Head = Idx
 
 	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
 	// val MAX_QUEUED = 6000 // Math.pow(2, (8 * 4) - 1) // TODO: CHECK
@@ -94,35 +95,34 @@ object Ring {
 
 
 
-
 	// ------------------------------------------------
 	// # Simple implementation, for debugging
-	type Head = Int
-	type State = (Boolean, Int, Int)
-	type AtomicState = AtomicAny[State]
-	def make(running: Boolean, tail: Idx, numQueued: Count) = {
-		(running, tail, numQueued)
-	}
-
-	def isStopped(t:State): Boolean = !t._1
-	def tailIndex(t:State):Idx = t._2
-	def numQueued(t:State):Count = t._3
-	def incrementQueued(t:State): State = make(!isStopped(t), tailIndex(t), numQueued(t) + 1)
-	// ------------------------------------------------
-	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
-	// type State = Long
-	// type AtomicState = AtomicLong
-	// private val HEAD_OFFSET = 48 // 64 - 16
-	// private val TAIL_OFFSET = 32 // 64 - (2*16)
-	// private val IDX_MASK = 0xffff // 2 bytes (16 bits)
-	// private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
-	// def make(head: Idx, tail: Idx, numQueued: Count) = {
-	// 	(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
+	// type State = (Boolean, Int, Int)
+	// type AtomicState = AtomicAny[State]
+	// def make(running: Boolean, tail: Idx, numQueued: Count) = {
+	// 	(running, tail, numQueued)
 	// }
-	// def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
-	// def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
-	// def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
-	// def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
+	//
+	// def isStopped(t:State): Boolean = !t._1
+	// def tailIndex(t:State):Idx = t._2
+	// def numQueued(t:State):Count = t._3
+	// def incrementQueued(t:State): State = make(!isStopped(t), tailIndex(t), numQueued(t) + 1)
+	// ------------------------------------------------
+	// # Packed implementation, for performance. IsRunning(1)|Tail(2)|NumQueued(4)
+	type State = Long
+	type AtomicState = AtomicLong
+	private val RUNNING_BIT = 1L << 63
+	private val ZERO = 0L
+	private val TAIL_OFFSET = 32 // 64 - (2*16)
+	private val IDX_MASK = 0xffff // 2 bytes (16 bits)
+	private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
+	def make(running: Boolean, tail: Idx, numQueued: Count) = {
+		(if (running) RUNNING_BIT else ZERO) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
+	}
+	def isStopped(t:State):Boolean = (t & RUNNING_BIT) == 0L
+	def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
+	def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
+	def incrementQueued(t:State): State = t + 1 // since queued is the last `n` bytes, we can just increment the whole int
 	// ------------------------------------------------
 
 }

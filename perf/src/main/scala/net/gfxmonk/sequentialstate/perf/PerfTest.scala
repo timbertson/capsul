@@ -424,13 +424,20 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 }
 
 object PerfTest {
-	val bufLen = 50
+	def main(): Unit = {
+		new PerfTest().main()
+	}
+
 	def makeThreadPool(parallelism: Int) = {
 		// Executors.newFixedThreadPool(parallelism)
 		new ForkJoinPool(parallelism)
 	}
+}
 
-	val threadPool = makeThreadPool(4)
+class PerfTest {
+	val bufLen = 50
+
+	val threadPool = PerfTest.makeThreadPool(4)
 	implicit val ec = ExecutionContext.fromExecutor(threadPool)
 	// val globalEc = scala.concurrent.ExecutionContext.Implicits.global
 	def makeLines(n:Int=500) = Iterator.continually {
@@ -478,7 +485,8 @@ object PerfTest {
 		val start = System.currentTimeMillis()
 		val f = impl
 		val result = Try {
-			Await.result(f(), Duration(2, TimeUnit.SECONDS))
+			// Await.result(f(), Duration(2, TimeUnit.SECONDS))
+			Await.result(f(), Duration(6, TimeUnit.SECONDS))
 			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {
@@ -521,7 +529,8 @@ object PerfTest {
 	}
 
 	def main(): Unit = {
-		val repeat = this.repeat(50, warmups=50) _
+		// val repeat = this.repeat(50, warmups=50) _
+		val repeat = this.repeat(10, warmups=0) _
 		val countLimit = 10000
 		val largePipeline = PipelineConfig(
 			stages = 10,
@@ -551,7 +560,7 @@ object PerfTest {
 		}
 
 		repeat("counter", List(
-			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
+			"SequentialState (unbounded) counter" -> (() => CounterState.run(countLimit * 10, bufLen = bufLen)),
 			"SequentialState (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
 			"Akka counter" -> (() => CounterActor.run(countLimit)),
 			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
@@ -575,9 +584,12 @@ object PerfTest {
 
 object LongLivedLoop {
 	def main(): Unit = {
-		val threadPool = PerfTest.makeThreadPool(4)
-		implicit val ec = ExecutionContext.fromExecutor(threadPool)
-		Await.result(CounterState.run(Int.MaxValue, bufLen = PerfTest.bufLen), Duration.Inf)
+		// val threadPool = PerfTest.makeThreadPool(4)
+		// implicit val ec = ExecutionContext.fromExecutor(threadPool)
+		// Await.result(CounterState.run(Int.MaxValue, bufLen = PerfTest.bufLen), Duration.Inf)
+		while(true) {
+			PerfTest.main()
+		}
 	}
 }
 

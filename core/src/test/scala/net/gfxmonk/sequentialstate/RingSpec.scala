@@ -43,7 +43,7 @@ class RingSpec extends FunSpec {
 				(true,2,3)
 			)
 			examples.map { case (a,b,c) =>
-				assert(Ring.repr(Ring.make(a,b,c)) == (a,b,c))
+				assert(Ring.tuple(Ring.make(a,b,c)) == (a,b,c))
 			}
 		}
 	}

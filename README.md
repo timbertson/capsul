@@ -9,10 +9,6 @@ A minimal, type-safe alternative to (some of) akka.
 
 I also presented an introduction to SequentialState at the [Melbourne Scala User Group](https://www.meetup.com/en-AU/Melbourne-Scala-User-Group/) in August 2017, you can see the [video](https://youtu.be/WsE4S8qDjgk) and [slides](https://timbertson.github.io/sequentialstate/talk/) (with speaker notes).
 
-### Warning:
-
-This code is currently incomplete. I'm convinced the ideas are sound, but I'm still working on an efficient and correct implementation of a multi-producer-single-consumer which forms the core of the execution engine. Currently this should be considered a partially-working proof of concept, it is not quite ready for real world use.
-
 ## Why should I use SequentialState?
 
 _SequentialState provides the same concurrency model as local actors, plus type safety and builtin support for non-blocking backpressure. It achieves this by simply encapsulating state, doing away with most other features of actors._
@@ -82,7 +78,7 @@ Unlike actors, SequentialState instances are typically `private` and do not talk
 Add to build.sbt:
 
 ```
-libraryDependencies += "net.gfxmonk" %% "sequentialstate" % "0.1.0"
+libraryDependencies += "net.gfxmonk" %% "sequentialstate" % "0.2.0"
 ```
 
 ### What features does it have?

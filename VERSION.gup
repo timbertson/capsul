@@ -1,7 +1,9 @@
 #!bash -eu
 gup -u build.sbt
-version="$(grep '^version :=' build.sbt | grep -o -E '"[^"]+' | cut -c 2-)"
+version="$(grep -E '^\s*version :=' build.sbt | grep -o -E '"[^"]+"' | tr -d '"')"
+echo "Version: $version"
 echo "$version" > "$1"
+[ -n "$version" ]
 
 dep_prefix="libraryDependencies += \"net.gfxmonk\" %% \"sequentialstate\" %"
 new_depline="$dep_prefix \"$version\""

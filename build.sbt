@@ -12,7 +12,7 @@ val scalaReflect = "org.scala-lang" % "scala-reflect" % scalaVer
 
 val commonSettings = Seq(
   organization := "net.gfxmonk",
-  name := "sequentialstate",
+  name := "capsul",
   description := "Minimal, thread-safe state encapsulation",
   version := "0.2.0",
 
@@ -31,13 +31,13 @@ lazy val log = (project in file("log")).settings(
   hiddenProject,
   scalacOptions ++= Seq("-language:experimental.macros"),
   libraryDependencies += scalaReflect,
-  name := "sequentialstate-log"
+  name := "capsul-log"
 )
 
 lazy val core = (project in file("core")).settings(
   commonSettings,
   libraryDependencies += scalaReflect,
-  name := "sequentialstate",
+  name := "capsul",
   publishMavenStyle := true,
   publishTo := {
     val v = version.value
@@ -50,12 +50,12 @@ lazy val core = (project in file("core")).settings(
   publishArtifact in Test := false,
 
   licenses := Seq("MIT" -> url("http://www.opensource.org/licenses/mit-license.php")),
-  homepage := Some(url("https://github.com/timbertson/sequentialstate")),
+  homepage := Some(url("https://github.com/timbertson/capsul")),
 
   scmInfo := Some(
     ScmInfo(
-      url("https://github.com/timbertson/sequentialstate"),
-      "scm:git@github.com:timbertson/sequentialstate.git"
+      url("https://github.com/timbertson/capsul"),
+      "scm:git@github.com:timbertson/capsul.git"
     )
   ),
 
@@ -82,20 +82,20 @@ lazy val perf = (project in file("perf")).settings(
   hiddenProject,
   libraryDependencies += "io.monix" %% "monix" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
-  name := "sequentialstate-perf"
+  name := "capsul-perf"
 ).dependsOn(core).dependsOn(log)
 
 lazy val stress = (project in file("stress")).settings(
   hiddenProject,
   version in Jcstress := "0.4",
-  name := "sequentialstate-stress"
+  name := "capsul-stress"
 ).dependsOn(core).dependsOn(log)
 
 lazy val examples = (project in file("examples")).settings(
   hiddenProject,
   libraryDependencies += "io.monix" %% "monix-eval" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
-  name := "sequentialstate-examples"
+  name := "capsul-examples"
 ).dependsOn(core).dependsOn(log % "compile-internal")
 
 

@@ -1,6 +1,6 @@
 ![Capsul](./res/logo.png)
 
-(previously known as `SequentialState`)
+### (previously known as `SequentialState`)
 
 Capsul is a minimal, type-safe alternative to (some of) akka. Features:
 
@@ -11,10 +11,10 @@ Capsul is a minimal, type-safe alternative to (some of) akka. Features:
 
 **Quick links:**
 
- - [API docs](https://timbertson.github.io/sequentialstate/api/net/gfxmonk/sequentialstate/)
- - [examples](./examples/src/main/scala/net/gfxmonk/sequentialstate/examples) for working examples.
+ - [API docs](https://timbertson.github.io/capsul/api/net/gfxmonk/capsul/)
+ - [examples](./examples/src/main/scala/net/gfxmonk/capsul/examples) for working examples.
 
-I also presented an introduction to Capsul (when it was called SequentialState) at the [Melbourne Scala User Group](https://www.meetup.com/en-AU/Melbourne-Scala-User-Group/) in August 2017, you can see the [video](https://youtu.be/WsE4S8qDjgk) and [slides](https://timbertson.github.io/sequentialstate/talk/) (with speaker notes).
+I also presented an introduction to Capsul (when it was called SequentialState) at the [Melbourne Scala User Group](https://www.meetup.com/en-AU/Melbourne-Scala-User-Group/) in August 2017, you can see the [video](https://youtu.be/WsE4S8qDjgk) and [slides](https://timbertson.github.io/capsul/talk/) (with speaker notes).
 
 ## Why should I use Capsul?
 
@@ -33,7 +33,7 @@ Also, when learning about akka-streams and monix (and the reactive streams proto
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
-import net.gfxmonk.sequentialstate._
+import net.gfxmonk.capsul._
 
 object Main {
 	def run(): Future[String] = {
@@ -85,7 +85,7 @@ Unlike actors, Capsul instances are typically `private` and do not talk to each 
 Add to build.sbt:
 
 ```
-libraryDependencies += "net.gfxmonk" %% "sequentialstate" % "0.2.0"
+libraryDependencies += "net.gfxmonk" %% "capsul" % "0.2.0"
 ```
 
 ### What features does it have?

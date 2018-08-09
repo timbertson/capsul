@@ -101,6 +101,7 @@ lazy val examples = (project in file("examples")).settings(
 ).dependsOn(core).dependsOn(log % "compile-internal")
 
 lazy val root = (project in file(".")).settings(
+  name := "consul-root",
   hiddenProject
-)
+).aggregate(core, perf, examples)
 

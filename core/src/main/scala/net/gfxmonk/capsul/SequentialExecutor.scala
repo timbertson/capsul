@@ -38,7 +38,7 @@ class RingItem[T>:Null<:AnyRef] {
  * We can get away with not tying numFutures into state, because it's advisory. If we run ahead / behind a little bit, it doesn't matter because
  * it doesn't affect correctness.
  */
-object Ring {
+private [capsul] object Ring {
 	type Count = Int
 	type Idx = Int
 
@@ -93,7 +93,7 @@ object Ring {
 
 }
 
-class Ring[T >: Null <: AnyRef](size: Int) {
+private [capsul] class Ring[T >: Null <: AnyRef](size: Int) {
 	import Ring._
 	if (size > MAX_SIZE) {
 		throw new RuntimeException(s"size ($size) is larger then the maximum ($MAX_SIZE)")

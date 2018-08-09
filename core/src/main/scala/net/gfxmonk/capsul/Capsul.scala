@@ -1,12 +1,5 @@
 package net.gfxmonk.capsul
 
-import java.util.concurrent.locks.LockSupport
-
-import monix.execution.atomic.{Atomic, AtomicAny}
-import monix.execution.misc.NonFatal
-
-import scala.annotation.tailrec
-import scala.collection.immutable.Queue
 import scala.concurrent.{ExecutionContext, Future, Promise}
 
 /** A wrapper for getting / setting state */

@@ -1,9 +1,8 @@
 package net.gfxmonk.capsul
 
-import monix.execution.misc.NonFatal
+import scala.util.control.NonFatal
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
-import scala.util.{Try,Success,Failure}
 
 trait EnqueueableTask {
 	// Simplification for the scheduler, which doesn't

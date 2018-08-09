@@ -1,11 +1,8 @@
 package net.gfxmonk.capsul
 
-import java.util.concurrent.locks.LockSupport
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.annotation.tailrec
 import net.gfxmonk.capsul.internal.Log
-
-import monix.execution.atomic._
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -63,6 +60,7 @@ object Ring {
 
 	// ------------------------------------------------
 	// // # Simple implementation, for debugging
+	// import monix.execution.atomic._
 	// type State = (Int, Int, Int)
 	// type AtomicState = AtomicAny[State]
 	// def make(head: Idx, tail: Idx, numQueued: Count) = {
@@ -74,6 +72,10 @@ object Ring {
 	// def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
 	// ------------------------------------------------
 	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
+	import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
+	def Atomic(n: Int): AtomicInteger = new AtomicInteger(n)
+	def Atomic(n: Long): AtomicLong = new AtomicLong(n)
+	type AtomicInt = AtomicInteger
 	type State = Long
 	type AtomicState = AtomicLong
 	private val HEAD_OFFSET = 48 // 64 - 16
@@ -161,8 +163,8 @@ object SequentialExecutor {
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private val ring = new Ring[EnqueueableTask](bufLen)
 	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
-	private val stateRef:Ring.AtomicState = Atomic(Ring.make(0,0,0))
-	private val numFuturesRef:AtomicInt = Atomic(0)
+	private val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
+	private val numFuturesRef:Ring.AtomicInt = Ring.Atomic(0)
 
 	// don't advance until you've freed up this many slots
 	private val advanceMinThreshold = Math.max(3, bufLen / 4)
@@ -352,11 +354,19 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 					case Some(f) => {
 						log("ran async node")
-						numFuturesRef.increment()
+						// numFuturesRef.increment()
+						var numFutures = numFuturesRef.get()
+						while(!numFuturesRef.compareAndSet(numFutures, numFutures+1)) {
+							numFutures = numFuturesRef.get()
+						}
 						// now that we've incremented running futures, set it up to decrement on completion
 						f.onComplete { _ =>
-							numFuturesRef.decrement()
-							log(s"item completed asynchronously, there are now ${numFuturesRef.get} outstanding futures")
+							// numFuturesRef.decrement()
+							var numFutures = numFuturesRef.get()
+							while(!numFuturesRef.compareAndSet(numFutures, numFutures-1)) {
+								numFutures = numFuturesRef.get()
+							}
+							log(s"item completed asynchronously, there are now ${numFutures-1} outstanding futures")
 							// try to dequeue. If there's no space available then either someone
 							// beat us to it, or there was a temporary burst of >bufLen async items
 							dequeueIfSpace(stateRef.get)

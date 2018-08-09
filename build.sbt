@@ -16,7 +16,7 @@ val commonSettings = Seq(
   description := "Minimal, thread-safe state encapsulation",
   version := "0.2.0",
 
-  libraryDependencies += "io.monix" %% "monix-execution" % monixVersion,
+  /* libraryDependencies += "io.monix" %% "monix-execution" % monixVersion, */
   libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
 )
 

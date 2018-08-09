@@ -4,7 +4,7 @@
 
 Capsul is a minimal, type-safe alternative to (some of) akka. Features:
 
- - Simple (less than 1k LOC)
+ - Simple (less than 1k LOC, no dependencies)
  - Familiar, functional & type-safe API
  - Backpressure built in
  - Efficient and non-blocking parallel execution (around the same performance as Akka)

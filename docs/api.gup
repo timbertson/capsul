@@ -8,5 +8,5 @@ if [ "$numlines" != 1 ]; then
 	echo -e "Unable to determine \$scaladir ($numlines dirs found):\n$scaladir"
 	exit 1
 fi
-cp -a "target/$scaladir/api" "$1"
+cp -a "core/target/$scaladir/api" "$1"
 

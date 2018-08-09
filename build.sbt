@@ -10,11 +10,13 @@ val akkaVersion = "2.5.3"
 
 val scalaReflect = "org.scala-lang" % "scala-reflect" % scalaVer
 
+crossScalaVersions := Seq("2.11.11", "2.12.1")
+
 val commonSettings = Seq(
   organization := "net.gfxmonk",
   name := "capsul",
   description := "Minimal, thread-safe state encapsulation",
-  version := "0.2.0",
+  version := "0.3.0",
 
   /* libraryDependencies += "io.monix" %% "monix-execution" % monixVersion, */
   libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
@@ -98,4 +100,7 @@ lazy val examples = (project in file("examples")).settings(
   name := "capsul-examples"
 ).dependsOn(core).dependsOn(log % "compile-internal")
 
+lazy val root = (project in file(".")).settings(
+  hiddenProject
+)
 

@@ -10,6 +10,7 @@ import scala.concurrent.duration._
 import scala.collection.immutable.Queue
 import scala.collection.mutable
 import net.gfxmonk.capsul.internal.Log
+import net.gfxmonk.capsul.testsupport._
 
 object SequentialExecutorSpec {
 	def group[A](items: List[A]): List[(A, Int)] = {

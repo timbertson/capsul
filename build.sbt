@@ -36,11 +36,7 @@ lazy val log = (project in file("log")).settings(
   name := "capsul-log"
 )
 
-lazy val core = (project in file("core")).settings(
-  commonSettings,
-  libraryDependencies += scalaReflect,
-  name := "capsul",
-  publishMavenStyle := true,
+lazy val publicProjectSettings = Seq(
   publishTo := {
     val v = version.value
     val nexus = "https://oss.sonatype.org/"
@@ -49,6 +45,7 @@ lazy val core = (project in file("core")).settings(
     else
       Some("releases"  at nexus + "service/local/staging/deploy/maven2")
   },
+  publishMavenStyle := true,
   publishArtifact in Test := false,
 
   licenses := Seq("MIT" -> url("http://www.opensource.org/licenses/mit-license.php")),
@@ -77,8 +74,20 @@ lazy val core = (project in file("core")).settings(
     "oss.sonatype.org",
     sys.env.getOrElse("SONATYPE_ACCOUNT", "timbertson"),
     sys.env.getOrElse("SONATYPE_PASSWORD", "******"))
+)
 
-).dependsOn(log % "compile-internal")
+lazy val core = (project in file("core")).settings(
+  commonSettings,
+  /* libraryDependencies += scalaReflect, */
+  name := "capsul",
+  publicProjectSettings,
+).dependsOn(log % "compile-internal").dependsOn(log % "test")
+
+lazy val mini = (project in file("mini")).settings(
+  commonSettings,
+  name := "capsul-mini",
+  /* publicProjectSettings */
+).dependsOn(core % "test")
 
 lazy val perf = (project in file("perf")).settings(
   hiddenProject,
@@ -91,7 +100,7 @@ lazy val stress = (project in file("stress")).settings(
   hiddenProject,
   version in Jcstress := "0.4",
   name := "capsul-stress"
-).dependsOn(core).dependsOn(log)
+).dependsOn(core).dependsOn(mini).dependsOn(log)
 
 lazy val examples = (project in file("examples")).settings(
   hiddenProject,

@@ -197,6 +197,18 @@ object CounterState {
 	}
 }
 
+object SimpleCounterState {
+	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
+		val counter = SimpleCapsul(0)
+		var limit = n
+		while(limit > 0) {
+			counter.transform(_+1)
+			limit -= 1
+		}
+		counter.current
+	}
+}
+
 object PipelineStage {
 	val completedFuture = Future.successful(())
 	class State[R] {
@@ -560,7 +572,8 @@ class PerfTest {
 		}
 
 		repeat("counter", List(
-			"Capsul (unbounded) counter" -> (() => CounterState.run(countLimit * 10, bufLen = bufLen)),
+			"SimpleCapsul (unbounded) counter" -> (() => SimpleCounterState.run(countLimit)),
+			"Capsul (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
 			"Capsul (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
 			"Akka counter" -> (() => CounterActor.run(countLimit)),
 			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))

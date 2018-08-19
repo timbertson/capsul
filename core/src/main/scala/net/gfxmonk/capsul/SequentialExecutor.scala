@@ -161,10 +161,10 @@ object SequentialExecutor {
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private val ring = new Ring[EnqueueableTask](bufLen)
-	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
-	private val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
-	private val numFuturesRef:Ring.AtomicInt = Ring.Atomic(0)
+	private [capsul] val ring = new Ring[EnqueueableTask](bufLen)
+	private [capsul] val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
+	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
+	private [capsul] val numFuturesRef:Ring.AtomicInt = Ring.Atomic(0)
 
 	// don't advance until you've freed up this many slots
 	private val advanceMinThreshold = Math.max(3, bufLen / 4)

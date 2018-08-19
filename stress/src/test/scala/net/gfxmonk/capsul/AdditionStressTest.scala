@@ -14,7 +14,7 @@ import org.openjdk.jcstress.infra.results._
 @Outcome(id = Array("50"), expect = ACCEPTABLE, desc = "100 - 50")
 @State
 class AdditionStressTest {
-	import Common._
+	import testsupport.Common._
 	implicit val ec = defaultEc
 	val state = Capsul(0, bufLen)
 

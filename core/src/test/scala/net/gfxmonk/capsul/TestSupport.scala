@@ -1,4 +1,4 @@
-package net.gfxmonk.capsul
+package net.gfxmonk.capsul.testsupport
 import java.util.concurrent.{Executors, ExecutorService}
 import org.scalatest._
 import scala.concurrent._

@@ -1,11 +1,10 @@
-package net.gfxmonk.capsul
+package net.gfxmonk.capsul.testsupport
 
 import java.util.concurrent.atomic._
 import java.util.concurrent.{Executors, TimeUnit, ForkJoinPool}
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.collection.JavaConversions._
-import monix.execution.atomic._
 
 import org.openjdk.jcstress.annotations.Expect._
 import org.openjdk.jcstress.annotations._
@@ -40,10 +39,10 @@ object Common {
 	val defaultEc = makeEc(parallelism)
 
 	class CountingExecutionContext(c: ExecutionContext) extends ExecutionContext {
-		private val tasks = Atomic(0)
+		private val tasks = new AtomicInteger(0)
 
 		override def execute(runnable: Runnable) {
-			tasks.increment()
+			tasks.incrementAndGet()
 			c.execute(runnable)
 		}
 

@@ -38,8 +38,16 @@ object UnitOfWork {
 		protected val ec: ExecutionContext
 	}
 
-	trait IgnoresResult[A] {
+	trait IgnoresSuccess[A] {
 		final def reportSuccess(result: A): Option[Future[_]] = None
+	}
+
+	trait IgnoresFailure {
+		final def reportFailure(error: Throwable): Option[Future[_]] = {
+			Console.err.println(s"Uncaught error in enqueued task: $error")
+			error.printStackTrace()
+			None
+		}
 	}
 
 	trait HasEnqueuePromise[A] {
@@ -110,15 +118,9 @@ object UnitOfWork {
 	{
 	}
 
-	trait IsEnqueueOnly { self: HasEnqueuePromise[Unit] =>
+	trait IsEnqueueOnly extends IgnoresFailure { self: HasEnqueuePromise[Unit] =>
 		final def enqueuedAsync() {
 			enqueuedPromise.success(())
-		}
-
-		final def reportFailure(error: Throwable): Option[Future[_]] = {
-			Console.err.println(s"Uncaught error in enqueued task: $error")
-			error.printStackTrace()
-			None
 		}
 	}
 
@@ -126,7 +128,7 @@ object UnitOfWork {
 		extends UnitOfWork[A]
 		with HasEnqueuePromise[Unit]
 		with IsEnqueueOnly
-		with IgnoresResult[A]
+		with IgnoresSuccess[A]
 	{
 	}
 

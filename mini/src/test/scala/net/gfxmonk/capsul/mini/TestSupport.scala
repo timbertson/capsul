@@ -1,0 +1,1 @@
+../../../../../../../../core/src/test/scala/net/gfxmonk/capsul/TestSupport.scala

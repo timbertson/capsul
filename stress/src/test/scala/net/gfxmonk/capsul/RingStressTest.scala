@@ -14,12 +14,12 @@ import org.openjdk.jcstress.infra.results._
 @JCStressTest
 @Outcome(
 	id = Array(
-		"head=3, (isRunning=false, tail=3, queued=0), futures=1" // 1 incomplete future, 3 items succeeded
+		"(head=3, tail=3, queued=0, futures=1)" // 1 incomplete future, 3 items succeeded
 	), expect = ACCEPTABLE,
 	desc = "enqueue excess sync item while completing an async item")
 @State
 class RingStressTest {
-	import Common._
+	import testsupport.Common._
 	implicit val ec = new CountingExecutionContext(defaultEc)
 	val executor = SequentialExecutor(bufLen)
 	def futureWork(f: Future[Unit]) = UnitOfWork.FullAsync(() => f)
@@ -49,16 +49,16 @@ class RingStressTest {
 	def arbiter(r: L_Result) {
 		// await(syncFuture)
 		val incompletePromises = readyFutures.tail
-		println(readyFutures)
+		// println(readyFutures)
 
 		@tailrec
 		def check(attempts: Int): String = {
 			var state = executor.stateRef.get
-			var head = executor.headRef.get
 			var numFutures = executor.numFuturesRef.get
-			val desc = s"head=$head, ${Ring.repr(state)}, futures=${numFutures}"
+			val (head, tail, queued) = Ring.repr(state)
+			val desc = s"(head=$head, tail=$tail, queued=$queued, futures=${numFutures})"
 
-			println(s"attempt[$attempts], ${desc}")
+			// println(s"attempt[$attempts], ${desc}")
 
 			// we want to end up in a state where:
 			//  - there's `incompletePromises.count` in `numFutures`
@@ -67,7 +67,7 @@ class RingStressTest {
 			if (
 				Ring.isStopped(state) &&
 				numFutures == incompletePromises.length &&
-				Ring.tailIndex(state) == head)
+				Ring.tailIndex(state) == Ring.headIndex(state))
 			{
 				// println(s"got it! isStopped = ${Ring.isStopped(state)} && ${numFutures} == ${incompletePromises.length} && ${Ring.tailIndex(state)} == $head  ;;;;  $desc")
 				desc

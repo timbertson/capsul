@@ -199,7 +199,7 @@ object CounterState {
 
 object SimpleCounterState {
 	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
-		val counter = SimpleCapsul(0)
+		val counter = mini.Capsul(0)
 		var limit = n
 		while(limit > 0) {
 			counter.transform(_+1)

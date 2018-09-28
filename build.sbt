@@ -94,7 +94,7 @@ lazy val perf = (project in file("perf")).settings(
   libraryDependencies += "io.monix" %% "monix" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "capsul-perf"
-).dependsOn(core).dependsOn(log)
+).dependsOn(core).dependsOn(mini).dependsOn(log)
 
 lazy val stress = (project in file("stress")).settings(
   hiddenProject,

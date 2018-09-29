@@ -36,13 +36,19 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 
 	import UnitOfWork._
 	def enqueueOnly(task: EnqueueableOp[Unit]) = {
-		// TODO: optimize?
-		Op(send(task))
+		if (Capsul.Send.perform(this, task)) {
+			Capsul.successfulUnit
+		} else {
+			task.enqueuedPromise.future
+		}
 	}
 
-	def enqueue[T](task: EnqueueableOp[Future[T]]): StagedFuture[T] = {
-		// TODO: optimize?
-		StagedFuture(Op(send(task)))
+	def enqueue[T](task: EnqueueableOp[Future[T]] with HasResultPromise[T]): StagedFuture[T] = {
+		if (Capsul.Send.perform(this, task)) {
+			StagedFuture.accepted(task.resultPromise.future)
+		} else {
+			StagedFuture(task.enqueuedPromise.future)
+		}
 	}
 
 	/** Send a pure transformation */
@@ -102,7 +108,7 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 		enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
 
 	def send[R](task: EnqueueableOp[R]): Op[R] = {
-		new Send(this, task, ec)
+		new Send(this, task)
 	}
 
 	// Note: doesn't need to be volatile, since we
@@ -155,6 +161,26 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
+	@tailrec private def shouldDoWork(task: EnqueueableOp[_]): Boolean = {
+		// TODO: is it really that useful to have Capsul participate in CML?
+		import Op._
+		var opState = task.opState.get()
+		if (opState == WAITING) {
+			if (task.opState.compareAndSet(WAITING, DONE)) {
+				true
+			} else {
+				// CAS fail
+				shouldDoWork(task)
+			}
+		} else if (opState == CLAIMED) {
+			// spin, it's temporary
+			shouldDoWork(task)
+		} else {
+			assert(opState == DONE)
+			false
+		}
+	}
+
 	@tailrec private def runLoop(acknowledgedSyncTasks: Int) {
 		import Log._
 		val logId = Log.scope(self, "WorkLoop.runLoop")
@@ -164,11 +190,15 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 			// TODO: try to decrement state once fullyCompletedItems exceeds limit/2
 			// (also acknowledge more tasks as we go)
 			
-			var work = buffer(taskIdx)
+			var task = buffer(taskIdx)
 			taskIdx += 1
 
-			// TODO: handle CAS for work with a non-null opState
-			work.run().filter(!_.isCompleted) match {
+			val resultFuture = if (task.opState == null || shouldDoWork(task)) {
+				task.run().filter(!_.isCompleted)
+			} else {
+				None
+			}
+			resultFuture match {
 				case None => {
 					log("ran sync node")
 				}
@@ -215,6 +245,7 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 
 object Capsul {
 	val DEFAULT_LIMIT = 10
+	private val successfulUnit = Future.successful(())
 
 	/** Create a Capsul with the default bufLen */
 	def apply[T](v: T)(implicit ec: ExecutionContext) = new Capsul[T](v, Capsul.DEFAULT_LIMIT)
@@ -232,42 +263,58 @@ object Capsul {
 	def numFutures(state: State) = (state & FUTURE_MASK) >> FUTURE_SHIFT
 	def size(state: State) = numFutures(state) + numQueued(state)
 
-	// TODO: too many futures! how can we unify return type and work Promise?
-	class Send[T,R](capsul: Capsul[T], work: EnqueueableOp[R], ec: ExecutionContext) extends Op[R] {
-		// A `Run` resolves once the item is submitted. Note: this op is non-retriable
+	object Send {
+		def perform[T,R](capsul: Capsul[T], task: EnqueueableOp[R])(implicit ec: ExecutionContext): Boolean = {
+			capsul.queue.add(task)
+			val prevState = capsul.runState.getAndIncrement()
+			val numQueued = Capsul.numQueued(prevState)
+			val numFutures = Capsul.numFutures(prevState)
+			if ((numQueued + numFutures) < capsul.limit) {
+				if (numQueued == 0) {
+					ec.execute(capsul.workLoop)
+				}
+				true
+			} else {
+				false
+			}
+		}
+	}
+
+	class Send[T,R](capsul: Capsul[T], task: EnqueueableOp[R])(implicit ec: ExecutionContext) extends Op[R] {
+		// A `Send` resolves once the item is submitted, although cancellation affects the actual run (never submission). Note: this op is non-retriable
 		@tailrec final def attempt(): Option[R] = {
 			val prevState = capsul.runState.get()
 			// Send only runs loop if it is the first queued item (and there is capacity)
-			if (numQueued(prevState) == 0 && numFutures(prevState) < capsul.limit) {
+			val numQueued = Capsul.numQueued(prevState)
+			val numFutures = Capsul.numFutures(prevState)
+			if (numQueued + numFutures < capsul.limit) {
 				if (capsul.runState.compareAndSet(prevState, prevState + 1)) {
-					capsul.queue.add(work)
-					work.enqueuedAsync()
-					Some(work.enqueuedPromise.future.value.get.get) // TODO: cleaner?
+					capsul.queue.add(task)
+					task.enqueuedAsync()
+
+					if (numQueued == 0) {
+						ec.execute(capsul.workLoop)
+					}
+					Some(task.enqueuedPromise.future.value.get.get) // TODO: surely this could be cleaner?
 				} else {
 					// conflict, retry
 					attempt()
 				}
 			} else {
+				// full, sorry!
 				None
 			}
 		}
 
-		def perform(opState: Op.State, promise: Promise[R]) = {
-			work.setOpState(opState)
-			capsul.queue.add(work)
-			val prevState = capsul.runState.getAndIncrement()
-			val numQueued = Capsul.numQueued(prevState)
-			val numFutures = Capsul.numFutures(prevState)
-			if (numQueued == 0 && numFutures < capsul.limit) {
-				ec.execute(capsul.workLoop)
-			}
-
-			if ((numQueued + numFutures) < capsul.limit) {
-				work.enqueuedAsync()
-			}
-			work.enqueuedPromise.future.onComplete(promise.tryComplete)(ec)
+		final def perform(opState: Op.State, promise: Promise[R]) = {
+			task.setOpState(opState)
+			Send.perform(capsul, task)
+			// XXX this promise succeeds on enqueue, which doesn't respect cancellation
+			task.enqueuedPromise.future.foreach(promise.success(_))
 		}
 	}
+
+	// TODO: we could conceptually have an Await op too, is it useful?
 
 	trait HasOpState {
 		private var _opState: Op.State = null // no need for volatile, always set before submitting work to the queue (plus a CAS on the state ref)
@@ -281,8 +328,6 @@ object Capsul {
 
 
 
-/// Capsul API
-
 import scala.concurrent.{ExecutionContext, Future, Promise}
 
 /** A wrapper for getting / setting state */
@@ -293,51 +338,3 @@ class Ref[T](init:T) {
 		v = updated
 	}
 }
-
-/**
-An encapsulation for thread-safe state.
-
-Methods are named <dispatch><operation><mode>
-
-== Dispatch types: ==
-
- - '''send''':   Enqueue an action, returning [[Future]][Unit]. Once the future is resolved, the
-                 action has been accepted by the worker, but not necessarily performed.
-
- - '''(none)''': Perform an action, returning a [[StagedFuture]][T].
-
-== Operations: ==
-
- - '''mutate''':    accepts a function of type `[[Ref]][T] => R`, returns `R`
- - '''transform''': accepts a function of type `T => T`, returns [[Unit]]
- - '''set''':       accepts a new value of type `T`, returns [[Unit]]
- - '''access''':    accepts a function of type `T => R`, returns `R`.
-                    The function is executed sequentually with other tasks,
-                    so it's safe to mutate `T`. If you simply want to get
-                    the current vaue without blocking other tasks, use [[current]].
-
-== Modes: ==
-
-Modes control when the state will accept more work.
-Each state will accept up to `bufLen` items immediately, and
-will run the functions sequentually.
-
-For asynchronous modes, subsequent tasks will still be run immediately
-after the function completes, but the task won't be considered done
-(for the purposes of accepting more tasks) until the future is resolved.
-
-This means that you must be careful with `mutate` actions or with mutable
-state objects - you may mutate the state during the execution of the
-function, but you may not do so asynchronously (e.g. after your future
-completes)
-
- - '''(empty)''': Synchronous. The task is completed as soon as it returns.
- - '''async''':   async ([[Future]]). The work returns a [[Future]][T], and the next
-                  task may begin immediately. This task continues to occupy a
-                  slot in this state's queue until the future completes.
- - '''staged''':  async ([[StagedFuture]]). The work returns a [[StagedFuture]][T], and
-                  the next task may begin immediately. This task continues to
-                  occupy a slot in this state's queue until the StagedFuture
-                  is accepted.
-
-*/

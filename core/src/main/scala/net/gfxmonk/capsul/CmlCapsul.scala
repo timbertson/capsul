@@ -10,11 +10,13 @@ import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
 
 import scala.concurrent.{ExecutionContext, Future}
 
+import UnitOfWork._
+
 class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 	import Capsul._
 
 	private val state = new Ref[T](initial)
-	private val queue = new ConcurrentLinkedQueue[EnqueueableOp]()
+	private val queue = new ConcurrentLinkedQueue[EnqueueableOp[_]]()
 
 	// runState is:
 	// xxxx|xxxx
@@ -33,24 +35,14 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 	/* == API == */
 
 	import UnitOfWork._
-	def enqueueOnly(task: EnqueueableOp with HasEnqueuePromise[Unit]) = {
-		// TODO: optimize
-		Op(submit(task))
-		task.enqueuedPromise.future
+	def enqueueOnly(task: EnqueueableOp[Unit]) = {
+		// TODO: optimize?
+		Op(send(task))
 	}
 
-	def enqueue[T](task: EnqueueableOp
-			with UnitOfWork.HasEnqueuePromise[Future[T]]
-			with UnitOfWork.HasResultPromise[T]
-	): StagedFuture[T] = {
-		// TODO: optimize
-		Op(submit(task))
-		StagedFuture(task.enqueuedPromise.future)
-		// if (doEnqueue(task)) {
-		// 	StagedFuture.accepted(task.resultPromise.future)
-		// } else {
-		// 	StagedFuture(task.enqueuedPromise.future)
-		// }
+	def enqueue[T](task: EnqueueableOp[Future[T]]): StagedFuture[T] = {
+		// TODO: optimize?
+		StagedFuture(Op(send(task)))
 	}
 
 	/** Send a pure transformation */
@@ -109,15 +101,13 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
 		enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
 
-
-	private def submit[R](task: EnqueueableOp): Op[Unit] = {
-		new Submit(this, task, ec)
+	def send[R](task: EnqueueableOp[R]): Op[R] = {
+		new Send(this, task, ec)
 	}
-
 
 	// Note: doesn't need to be volatile, since we
 	// always write to it before reading in the same thread
-	private var buffer = new Array[EnqueueableOp](limit)
+	private var buffer = new Array[EnqueueableOp[_]](limit)
 
 	@tailrec private def acknowledgeAndBuffer(alreadyCompleted: Int): Int = {
 		val state = runState.get()
@@ -233,7 +223,7 @@ object Capsul {
 	def apply[T](v: T, bufLen: Int)(implicit ec: ExecutionContext) = new Capsul[T](v, bufLen)
 
 	type State = Long
-	type EnqueueableOp = EnqueueableTask with HasOpState
+	type EnqueueableOp[T] = EnqueueableTask with HasOpState with HasEnqueuePromise[T]
 	val TASK_MASK = 0xFFFFFFFF // 8 lower bytes
 	val FUTURE_SHIFT = 8
 	val FUTURE_MASK = TASK_MASK << FUTURE_SHIFT // 8 top bytes
@@ -243,26 +233,26 @@ object Capsul {
 	def size(state: State) = numFutures(state) + numQueued(state)
 
 	// TODO: too many futures! how can we unify return type and work Promise?
-	class Submit[T,R](capsul: Capsul[T], work: EnqueueableOp, ec: ExecutionContext) extends Op[Unit] {
+	class Send[T,R](capsul: Capsul[T], work: EnqueueableOp[R], ec: ExecutionContext) extends Op[R] {
 		// A `Run` resolves once the item is submitted. Note: this op is non-retriable
-		@tailrec final def attempt(promise: Promise[Unit]): Boolean = {
+		@tailrec final def attempt(): Option[R] = {
 			val prevState = capsul.runState.get()
-			// submit only runs loop if it is the first queued item (and there is capacity)
+			// Send only runs loop if it is the first queued item (and there is capacity)
 			if (numQueued(prevState) == 0 && numFutures(prevState) < capsul.limit) {
 				if (capsul.runState.compareAndSet(prevState, prevState + 1)) {
 					capsul.queue.add(work)
-					promise.success(())
-					true
+					work.enqueuedAsync()
+					Some(work.enqueuedPromise.future.value.get.get) // TODO: cleaner?
 				} else {
 					// conflict, retry
-					attempt(promise)
+					attempt()
 				}
 			} else {
-				false
+				None
 			}
 		}
 
-		def perform(opState: Op.State, promise: Promise[Unit]) = {
+		def perform(opState: Op.State, promise: Promise[R]) = {
 			work.setOpState(opState)
 			capsul.queue.add(work)
 			val prevState = capsul.runState.getAndIncrement()
@@ -274,8 +264,8 @@ object Capsul {
 
 			if ((numQueued + numFutures) < capsul.limit) {
 				work.enqueuedAsync()
-				promise.success(())
 			}
+			work.enqueuedPromise.future.onComplete(promise.tryComplete)(ec)
 		}
 	}
 

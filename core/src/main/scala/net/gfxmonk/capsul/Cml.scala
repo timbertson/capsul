@@ -5,7 +5,6 @@ import scala.annotation.tailrec
 import scala.concurrent._
 import scala.concurrent.duration._
 import net.gfxmonk.capsul.internal.Log
-import net.gfxmonk.capsul.EnqueueableTask
 import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -17,10 +16,13 @@ object Op {
 	type State = AtomicInteger
 
 	def apply[T](op: Op[T]): Future[T] = {
-		val promise = Promise[T]()
-		if (!op.attempt(promise)) {
-			val state = new AtomicInteger(WAITING)
-			op.perform(state, promise)
+		op.attempt match {
+			case Some(t) => Future.successful(t)
+			case None => {
+				val state = new AtomicInteger(WAITING)
+				val promise = Promise[T]()
+				op.perform(state, promise)
+			}
 		}
 		promise.future
 	}
@@ -31,13 +33,14 @@ object Op {
 }
 
 class ChooseOp[T](ops: Seq[Op[T]]) extends Op[T] {
-	def attempt(promise: Promise[T]): Boolean = {
+	def attempt(): Option[T] = {
 		ops.foreach { op =>
-			if (op.attempt(promise)) {
-				return true
+			val attempt = op.attempt()
+			if (attempt.isDefined) {
+				return attempt
 			}
 		}
-		false
+		None
 	}
 
 	def perform(state: Op.State, promise: Promise[T]): Unit = {
@@ -49,24 +52,20 @@ class ChooseOp[T](ops: Seq[Op[T]]) extends Op[T] {
 }
 
 class WrapOp[T,R](op: Op[T], fn: T => R)(implicit ec: ExecutionContext) extends Op[R] {
-	private def proxy(promise: Promise[R]): Promise[T] = {
-		val initial = Promise[T]()
-		initial.future.foreach(x => promise.success(fn(x)))
-		initial
-	}
-
-	def attempt(promise: Promise[R]): Boolean = {
-		op.attempt(proxy(promise))
+	def attempt(): Option[R] = {
+		op.attempt.map(fn)
 	}
 
 	def perform(state: Op.State, promise: Promise[R]): Unit = {
-		op.perform(state, proxy(promise))
+		val initial = Promise[T]()
+		initial.future.foreach(x => promise.success(fn(x)))
+		op.perform(state, initial)
 	}
 }
 
 trait Op[T] {
 	import Op._
-	def attempt(promise: Promise[T]): Boolean
+	def attempt(): Option[T]
 	def perform(state: State, promise: Promise[T]): Unit
 	def wrap[R](fn: T => R)(implicit ec: ExecutionContext): Op[R] = {
 		new WrapOp(this, fn)
@@ -90,24 +89,23 @@ object Channel {
 
 	class Recv[T](channel: Channel[T]) extends Op[T] {
 		import Op._
-		@tailrec final def attempt(promise: Promise[T]): Boolean = {
+		@tailrec final def attempt(): Option[T] = {
 			channel.senders.peek() match {
-				case null => false
+				case null => None
 				case sender => {
 					if (sender.state.compareAndSet(WAITING, DONE)) {
 						val removed = channel.senders.peek()
 						assert(removed == sender)
 						sender.promise.success(())
-						promise.success(sender.value)
-						true
+						Some(sender.value)
 					} else {
 						val state = sender.state.get()
 						if (state == DONE) {
 							channel.senders.remove(sender)
 							// keep trying
-							attempt(promise)
+							attempt()
 						} else {
-							false
+							None
 						}
 					}
 				}
@@ -154,24 +152,23 @@ object Channel {
 
 	class Send[T](channel: Channel[T], value: T) extends Op[Unit] {
 		import Op._
-		@tailrec final def attempt(promise: Promise[Unit]): Boolean = {
+		@tailrec final def attempt(): Option[Unit] = {
 			channel.receivers.peek() match {
-				case null => false
+				case null => None
 				case receiver => {
 					if (receiver.state.compareAndSet(WAITING, DONE)) {
 						val removed = channel.receivers.poll()
 						assert(removed == receiver)
 						receiver.promise.success(value)
-						promise.success(())
-						true
+						Some(())
 					} else {
 						val state = receiver.state.get()
 						if (state == DONE) {
 							channel.receivers.remove(receiver)
 							// keep trying
-							attempt(promise)
+							attempt()
 						} else {
-							false
+							None
 						}
 					}
 				}

@@ -1,22 +1,33 @@
-package net.gfxmonk.capsul.cml
+package net.gfxmonk.capsul
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.annotation.tailrec
 import scala.concurrent._
 import scala.concurrent.duration._
 import net.gfxmonk.capsul.internal.Log
-import net.gfxmonk.capsul.StagedFuture
-import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
+import java.util.concurrent.atomic.AtomicLong
 
 import scala.concurrent.{ExecutionContext, Future}
 
 import UnitOfWork._
 
-class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
-	import Capsul._
+object SimpleExecutor {
+	val DEFAULT_LIMIT = 10
+	type State = Long
+	val TASK_MASK = 0xFFFFFFFFL // 4 lower bytes
+	val FUTURE_SHIFT = 32 // 4 bytes
+	val FUTURE_MASK = TASK_MASK << FUTURE_SHIFT // 4 top bytes
+	val SINGLE_FUTURE = 0x01L << FUTURE_SHIFT // lower bit of FUTURE_MASK set
+	def numQueued(state: State): Long = state & TASK_MASK
+	def numFutures(state: State): Long = (state & FUTURE_MASK) >> FUTURE_SHIFT
+	def repr(state: State) = s"State(${numFutures(state)},${numQueued(state)})"
+}
 
-	private val state = new Ref[T](initial)
-	private val queue = new ConcurrentLinkedQueue[EnqueueableOp[_]]()
+class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends SequentialExecutor {
+	import SimpleExecutor._
+	import Log._
+
+	private val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
 
 	// runState is:
 	// xxxx|xxxx
@@ -30,104 +41,46 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 	// When we get to `limit` outstanding futures, we also suspend. In that case each future's
 	// onComplete will reschedule if (a) there is work queued, and (b) there were `limit` outstanding futures
 
-	private val runState = new AtomicInteger(0)
-
-	/* == API == */
-
-	import UnitOfWork._
-	def enqueueOnly(task: EnqueueableOp[Unit]) = {
-		if (Capsul.Send.perform(this, task)) {
-			Capsul.successfulUnit
-		} else {
-			task.enqueuedPromise.future
-		}
-	}
-
-	def enqueue[T](task: EnqueueableOp[Future[T]] with HasResultPromise[T]): StagedFuture[T] = {
-		if (Capsul.Send.perform(this, task)) {
-			StagedFuture.accepted(task.resultPromise.future)
-		} else {
-			StagedFuture(task.enqueuedPromise.future)
-		}
-	}
-
-	/** Send a pure transformation */
-	def sendTransform(fn: T => T): Future[Unit] =
-		enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(fn(state.current))))
-
-	/** Send a set operation */
-	def sendSet(updated: T): Future[Unit] =
-		enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(updated)))
-
-	/** Send an access operation */
-	def sendAccess(fn: T => _): Future[Unit] =
-		enqueueOnly(UnitOfWork.EnqueueOnly(() => fn(state.current)))
-
-	/** Send an access operation which returns a [[StagedFuture]][R] */
-	def sendAccessStaged[A](fn: T => StagedFuture[A])(implicit ec: ExecutionContext): Future[Unit] =
-		enqueueOnly(UnitOfWork.EnqueueOnlyStaged(() => fn(state.current)))
-
-	/** Send an access operation which returns a [[Future]][R] */
-	def sendAccessAsync[A](fn: T => Future[A]): Future[Unit] =
-		enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
-
-	/** Return the current state value */
-	def current: Future[T] =
-		enqueue(UnitOfWork.Full(() => state.current))
-
-	/** Perform a full mutation */
-	def mutate[R](fn: Ref[T] => R): StagedFuture[R] =
-		enqueue(UnitOfWork.Full(() => fn(state)))
-
-	/** Perform a pure transformation */
-	def transform(fn: T => T): StagedFuture[T] =
-		enqueue(UnitOfWork.Full { () =>
-			val updated = fn(state.current)
-			state.set(updated)
-			updated
-		})
-
-	/** Perform a function with the current state */
-	def access[R](fn: T => R): StagedFuture[R] =
-		enqueue(UnitOfWork.Full(() => fn(state.current)))
-
-	/** Perform a mutation which returns a [[StagedFuture]][R] */
-	def mutateStaged[R](fn: Ref[T] => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		enqueue(new UnitOfWork.FullStaged[R](() => fn(state)))
-
-	/** Perform a mutation which returns a [[Future]][R] */
-	def mutateAsync[R](fn: Ref[T] => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		enqueue(new UnitOfWork.FullAsync[R](() => fn(state)))
-
-	/** Perform an access which returns a [[StagedFuture]][R] */
-	def accessStaged[R](fn: T => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		enqueue(new UnitOfWork.FullStaged[R](() => fn(state.current)))
-
-	/** Perform an access which returns a [[Future]][R] */
-	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
-
-	def send[R](task: EnqueueableOp[R]): Op[R] = {
-		new Send(this, task)
-	}
+	private val runState = new AtomicLong(0)
 
 	// Note: doesn't need to be volatile, since we
-	// always write to it before reading in the same thread
-	private var buffer = new Array[EnqueueableOp[_]](limit)
+	// only need to read writes that happened earlier in the same thread
+	private var buffer = new Array[EnqueueableTask](limit)
+	private val self = this
+
+	override protected final def doEnqueue(task: EnqueueableTask): Boolean = {
+		queue.add(task)
+		val prevState = runState.getAndIncrement()
+		val numQueued = SimpleExecutor.numQueued(prevState)
+		val numFutures = SimpleExecutor.numFutures(prevState)
+		if ((numQueued + numFutures) < limit) {
+			if (numQueued == 0) {
+				ec.execute(workLoop)
+			}
+			true
+		} else {
+			false
+		}
+	}
 
 	@tailrec private def acknowledgeAndBuffer(alreadyCompleted: Int): Int = {
+		val logId = Log.scope(self, "WorkLoop.acknowledgeAndBuffer")
 		val state = runState.get()
 
 		// we can acknowledge up to limit tasks, minus outstanding futures
-		val availableSyncTasks = Math.min(limit, numQueued(state) - alreadyCompleted) - numFutures(state)
+		val numFutures = SimpleExecutor.numFutures(state)
+		val availableSyncTasks = Math.min(limit - numFutures, numQueued(state) - alreadyCompleted)
+		log(s"availableSyncTasks = $availableSyncTasks (from ${repr(state)}, with $alreadyCompleted already completed tasks")
 		if (availableSyncTasks == 0) {
 			if (alreadyCompleted == 0) {
 				// we're done, shut down
+				log(s"shutting down ...")
 				0
 			} else {
 				// nothing to do, but we've still got queued items
 				if (runState.compareAndSet(state, state - alreadyCompleted)) {
 					// no conflict, shut down
+					log(s"shutting down after CASing state...")
 					0
 				} else {
 					// conflict, retry
@@ -135,79 +88,66 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 				}
 			}
 		} else {
-			var acknowledgedSyncTasks = 0
+			// there were availableSyncTasks when we checked, but there's no harm in dequeueing extra
+			// tasks if they're there by the time we grab them
+			val dequeueLimit = limit - numFutures
 
 			// acknowledge new tasks _before_ decrementing state, to ensure enqueuer won't acknowledge tasks later in the queue
+			var acknowledgedSyncTasks = 0
 			while (acknowledgedSyncTasks == 0) {
 				// loop until we've acknowledged at least one task
-				// val it = queue.iterator()
-				// TODO we could go up to `limit - numFutures`, rather than cap at availableSyncTasks
-				var item = queue.poll()
-				while(acknowledgedSyncTasks < availableSyncTasks) {
-					while(item == null) {
-						// there must be an item eventually, we were promised!
-						item = queue.poll()
-					}
-					// TODO: can we only enqueuedAsync for those items where it hasn't been called yet?
-					item.enqueuedAsync()
-					buffer.update(acknowledgedSyncTasks, item)
-					acknowledgedSyncTasks += 1
-				}
+				log(s"dequeueing up to $dequeueLimit items into buffer (of $availableSyncTasks available, state = ${repr(state)})")
+				acknowledgedSyncTasks = dequeueIntoBuffer(0, dequeueLimit)
+				log(s"dequeued $acknowledgedSyncTasks items into buffer")
 			}
 			if (alreadyCompleted != 0) {
+				log(s"decrementing runState by $alreadyCompleted (to ${numQueued(state) - alreadyCompleted})")
 				runState.addAndGet(-alreadyCompleted)
 			}
 			acknowledgedSyncTasks
 		}
 	}
 
-	@tailrec private def shouldDoWork(task: EnqueueableOp[_]): Boolean = {
-		// TODO: is it really that useful to have Capsul participate in CML?
-		import Op._
-		var opState = task.opState.get()
-		if (opState == WAITING) {
-			if (task.opState.compareAndSet(WAITING, DONE)) {
-				true
+	@tailrec private def dequeueIntoBuffer(index: Int, maxDequeue: Long): Int = {
+		val logId = Log.scope(self, "WorkLoop.dequeueIntoBuffer")
+		// returns num items dequeued
+		val item = queue.poll()
+		log(s"dequeued item $item for buffer index $index")
+		if (item != null) {
+			// TODO: can we do figure out when to use enqueuedAsync instead of tryEnqueuedAsync?
+			item.tryEnqueuedAsync()
+			buffer.update(index, item)
+			val nextIndex = index + 1
+			if (nextIndex < maxDequeue) {
+				dequeueIntoBuffer(nextIndex, maxDequeue)
 			} else {
-				// CAS fail
-				shouldDoWork(task)
+				nextIndex
 			}
-		} else if (opState == CLAIMED) {
-			// spin, it's temporary
-			shouldDoWork(task)
 		} else {
-			assert(opState == DONE)
-			false
+			index
 		}
 	}
 
-	@tailrec private def runLoop(acknowledgedSyncTasks: Int) {
-		import Log._
+	@tailrec private def runLoop(numTasks: Int) {
 		val logId = Log.scope(self, "WorkLoop.runLoop")
 		// perform all acknowledged tasks
 		var taskIdx = 0
-		while (taskIdx < acknowledgedSyncTasks) {
+		while (taskIdx < numTasks) {
 			// TODO: try to decrement state once fullyCompletedItems exceeds limit/2
 			// (also acknowledge more tasks as we go)
 			
 			var task = buffer(taskIdx)
-			taskIdx += 1
-
-			val resultFuture = if (task.opState == null || shouldDoWork(task)) {
-				task.run().filter(!_.isCompleted)
-			} else {
-				None
-			}
-			resultFuture match {
+			task.run().filter(!_.isCompleted) match {
 				case None => {
-					log("ran sync node")
+					log(s"ran sync node @ $taskIdx")
 				}
 				case Some(f) => {
 					log("ran async node")
 					self.runState.getAndAdd(SINGLE_FUTURE)
 					f.onComplete { _ =>
-						val prevState = self.runState.addAndGet(-SINGLE_FUTURE)
+						val prevState = self.runState.getAndAdd(-SINGLE_FUTURE)
 						assert(numFutures(prevState) <= limit)
+						log(s"one future completed in ${repr(prevState)}")
 						if (numFutures(prevState) == limit && numQueued(prevState) > 0) {
 							// we just freed up a slot to deque a pending task into. The loop
 							// was stopped (waiting for futures), so we should run it again
@@ -217,124 +157,27 @@ class Capsul[T](initial:T, val limit: Int)(implicit ec: ExecutionContext) {
 				}
 			}
 			buffer.update(taskIdx, null) // enable GC
+			taskIdx += 1
 		}
 
-		// loop again, if there are more tasks
-		// We've done acknowledgedSyncTasks tasks, but haven't updated state yet.
-		// First, see if there's more to do
-		val newlyAcknowledgedTasks = acknowledgeAndBuffer(acknowledgedSyncTasks)
+		val newlyAcknowledgedTasks = acknowledgeAndBuffer(alreadyCompleted = numTasks)
+		log(s"After completing ${numTasks}, there are ${newlyAcknowledgedTasks} tasks acknowledged and ready to go")
 		if (newlyAcknowledgedTasks > 0) {
 			// do another loop
 			runLoop(newlyAcknowledgedTasks)
 		}
 	}
 
-	private val self = this
-	private val workLoop: Runnable = new Runnable() {
+	private [capsul] val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
 			val logId = Log.scope(self, "WorkLoop")
+			log("start")
 			// TODO: trampoline somewhere in here...
 			// loop(1000)
 
-			var numAcknowledged = acknowledgeAndBuffer(0)
-			assert(numAcknowledged > 0) // shouldn't start loop unless tasks are ready
-			runLoop(numAcknowledged)
+			var numTasks = acknowledgeAndBuffer(0)
+			assert(numTasks > 0) // shouldn't start loop unless tasks are ready
+			runLoop(numTasks)
 		}
-	}
-}
-
-object Capsul {
-	val DEFAULT_LIMIT = 10
-	private val successfulUnit = Future.successful(())
-
-	/** Create a Capsul with the default bufLen */
-	def apply[T](v: T)(implicit ec: ExecutionContext) = new Capsul[T](v, Capsul.DEFAULT_LIMIT)
-
-	/** Create a Capsul with the provided bufLen */
-	def apply[T](v: T, bufLen: Int)(implicit ec: ExecutionContext) = new Capsul[T](v, bufLen)
-
-	type State = Long
-	type EnqueueableOp[T] = EnqueueableTask with HasOpState with HasEnqueuePromise[T]
-	val TASK_MASK = 0xFFFFFFFF // 8 lower bytes
-	val FUTURE_SHIFT = 8
-	val FUTURE_MASK = TASK_MASK << FUTURE_SHIFT // 8 top bytes
-	val SINGLE_FUTURE = 0x01 << FUTURE_SHIFT // lower bit of FUTURE_MASK set
-	def numQueued(state: State) = state & TASK_MASK
-	def numFutures(state: State) = (state & FUTURE_MASK) >> FUTURE_SHIFT
-	def size(state: State) = numFutures(state) + numQueued(state)
-
-	object Send {
-		def perform[T,R](capsul: Capsul[T], task: EnqueueableOp[R])(implicit ec: ExecutionContext): Boolean = {
-			capsul.queue.add(task)
-			val prevState = capsul.runState.getAndIncrement()
-			val numQueued = Capsul.numQueued(prevState)
-			val numFutures = Capsul.numFutures(prevState)
-			if ((numQueued + numFutures) < capsul.limit) {
-				if (numQueued == 0) {
-					ec.execute(capsul.workLoop)
-				}
-				true
-			} else {
-				false
-			}
-		}
-	}
-
-	class Send[T,R](capsul: Capsul[T], task: EnqueueableOp[R])(implicit ec: ExecutionContext) extends Op[R] {
-		// A `Send` resolves once the item is submitted, although cancellation affects the actual run (never submission). Note: this op is non-retriable
-		@tailrec final def attempt(): Option[R] = {
-			val prevState = capsul.runState.get()
-			// Send only runs loop if it is the first queued item (and there is capacity)
-			val numQueued = Capsul.numQueued(prevState)
-			val numFutures = Capsul.numFutures(prevState)
-			if (numQueued + numFutures < capsul.limit) {
-				if (capsul.runState.compareAndSet(prevState, prevState + 1)) {
-					capsul.queue.add(task)
-					task.enqueuedAsync()
-
-					if (numQueued == 0) {
-						ec.execute(capsul.workLoop)
-					}
-					Some(task.enqueuedPromise.future.value.get.get) // TODO: surely this could be cleaner?
-				} else {
-					// conflict, retry
-					attempt()
-				}
-			} else {
-				// full, sorry!
-				None
-			}
-		}
-
-		final def perform(opState: Op.State, promise: Promise[R]) = {
-			task.setOpState(opState)
-			Send.perform(capsul, task)
-			// XXX this promise succeeds on enqueue, which doesn't respect cancellation
-			task.enqueuedPromise.future.foreach(promise.success(_))
-		}
-	}
-
-	// TODO: we could conceptually have an Await op too, is it useful?
-
-	trait HasOpState {
-		private var _opState: Op.State = null // no need for volatile, always set before submitting work to the queue (plus a CAS on the state ref)
-
-		def opState: Op.State = _opState
-		def setOpState(newState: Op.State): Unit = {
-			_opState = newState
-		}
-	}
-}
-
-
-
-import scala.concurrent.{ExecutionContext, Future, Promise}
-
-/** A wrapper for getting / setting state */
-class Ref[T](init:T) {
-	private var v = init
-	def current = v
-	def set(updated:T) {
-		v = updated
 	}
 }

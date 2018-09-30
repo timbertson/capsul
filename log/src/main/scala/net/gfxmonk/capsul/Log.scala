@@ -17,8 +17,8 @@ private [capsul] class LogCtx(id: String, val buf: Log.LogBuffer) {
 }
 
 object Log {
-	// val ENABLE = true; type Ctx = LogCtx
-	val ENABLE = false; type Ctx = Unit
+	val ENABLE = true; type Ctx = LogCtx
+	// val ENABLE = false; type Ctx = Unit
 
 	val MAX_LOG_LINES = 1000
 	type LogEntry = (Long,String)
@@ -203,6 +203,7 @@ object Log {
 		}
 
 		def doLog(buf: LogBuffer, s: String) {
+			println(s)
 			val time = System.nanoTime()
 			var queue = buf.get.enqueue(time -> s)
 			if (queue.length > MAX_LOG_LINES) {

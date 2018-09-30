@@ -29,7 +29,7 @@ object SequentialExecutorSpec {
 	class Ctx(bufLen: Int, val ec: InspectableExecutionContext) {
 		implicit val executionContext: ExecutionContext = ec
 		var count = new Ctx.Count
-		val ex = new SequentialExecutor(bufLen)(ec)
+		val ex = SequentialExecutor(bufLen)(ec)
 		var promises = new mutable.Queue[Promise[Unit]]()
 
 		def awaitAll[A](futures: List[Future[A]], seconds:Int = 10) =
@@ -123,7 +123,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 	override def beforeAll = Ctx.init()
 	override def afterAll = Ctx.shutdown()
 
-	val timeLimit = 10.seconds
+	val timeLimit = 3.seconds
 	var logsDumped = false
 
 	private def dumpLogs(dumper: Function2[String,Option[Any],Unit]) {
@@ -153,6 +153,18 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 			case other => ()
 		}
 		result
+	}
+
+	describe("basic maths") {
+		it("stores futures and tasks within the same long") {
+			import SimpleExecutor._
+			val state = 0L
+			assert(repr(0L) == "State(0,0)")
+			assert(repr(53) == "State(0,53)")
+			assert(repr(SINGLE_FUTURE) == "State(1,0)")
+			assert(repr(53 + SINGLE_FUTURE) == "State(1,53)")
+			assert(repr(53 + (100*SINGLE_FUTURE)) == "State(100,53)")
+		}
 	}
 
 	describe("synchronous tasks") {
@@ -259,7 +271,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 			val ctx = Ctx.withManualExecution(3); import ctx._
 			val futures = List.fill(6)(ex.enqueue(incAsync()))
 			assert(group(futures.take(4).map(_.isAccepted)) == List(true -> 3, false -> 1))
-			ec.runOne()
+			ec.runUntilEmpty()
 			// ex still blocked because it has three outstanding futures
 			assert(group(futures.take(4).map(_.isAccepted)) == List(true -> 3, false -> 1))
 

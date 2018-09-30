@@ -6,7 +6,6 @@ import net.gfxmonk.capsul.internal.Log
 
 import scala.concurrent.{ExecutionContext, Future}
 
-
 class RingItem[T>:Null<:AnyRef] {
 	@volatile private var contents:T = null
 	def set(item:T) {
@@ -156,21 +155,12 @@ private [capsul] class Ring[T >: Null <: AnyRef](size: Int) {
 
 object SequentialExecutor {
 	val defaultBufferSize = 10
-	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
-	private val successfulUnit = Future.successful(())
+	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SimpleExecutor(bufLen)
+	private [capsul] val successfulUnit = Future.successful(())
 }
 
-class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private [capsul] val ring = new Ring[EnqueueableTask](bufLen)
-	private [capsul] val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
-	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
-	private [capsul] val numFuturesRef:Ring.AtomicInt = Ring.Atomic(0)
-
-	// don't advance until you've freed up this many slots
-	private val advanceMinThreshold = Math.max(3, bufLen / 4)
-
-	import Log.log
-	import Ring._
+trait SequentialExecutor {
+	protected def doEnqueue(work: EnqueueableTask): Boolean
 
 	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (doEnqueue(task)) {
@@ -191,6 +181,20 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			StagedFuture(task.enqueuedPromise.future)
 		}
 	}
+
+}
+
+class RingbufferExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends SequentialExecutor {
+	private [capsul] val ring = new Ring[EnqueueableTask](bufLen)
+	private [capsul] val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
+	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
+	private [capsul] val numFuturesRef:Ring.AtomicInt = Ring.Atomic(0)
+
+	// don't advance until you've freed up this many slots
+	private val advanceMinThreshold = Math.max(3, bufLen / 4)
+
+	import Log.log
+	import Ring._
 
 	private def dequeueItemsInto(dest: Idx, numItems: Int): Idx = {
 		val logId = Log.scope(this, s"dequeueItemsInto($dest, $numItems)")
@@ -250,7 +254,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	@tailrec
-	private def doEnqueue(work: EnqueueableTask):Boolean = {
+	override protected final def doEnqueue(work: EnqueueableTask):Boolean = {
 		val logId = Log.scope(this, "Executor.doEnqueue")
 		val state = stateRef.get
 		val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)

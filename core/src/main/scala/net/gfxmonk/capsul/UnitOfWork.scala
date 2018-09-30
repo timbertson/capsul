@@ -8,6 +8,7 @@ trait EnqueueableTask {
 	// Simplification for the scheduler, which doesn't
 	// care about the type parameter in UnitOfWork
 	def enqueuedAsync(): Unit
+	def tryEnqueuedAsync(): Unit
 	def run(): Option[Future[_]]
 }
 
@@ -15,6 +16,7 @@ trait UnitOfWork[A] extends EnqueueableTask {
 	protected val fn: Function0[A]
 
 	def enqueuedAsync(): Unit
+	def tryEnqueuedAsync(): Unit
 	protected def reportSuccess(result: A): Option[Future[_]]
 	protected def reportFailure(error: Throwable): Option[Future[_]]
 
@@ -32,6 +34,7 @@ trait UnitOfWork[A] extends EnqueueableTask {
 object UnitOfWork {
 	val noop: EnqueueableTask = new EnqueueableTask {
 		override def enqueuedAsync() = ()
+		override def tryEnqueuedAsync() = ()
 		override def run() = None
 	}
 	trait HasExecutionContext {
@@ -72,6 +75,10 @@ object UnitOfWork {
 	trait HasEnqueueAndResultPromise[A] { self: HasEnqueuePromise[Future[A]] with HasResultPromise[A] =>
 		final def enqueuedAsync() {
 			enqueuedPromise.success(resultPromise.future)
+		}
+
+		final def tryEnqueuedAsync() {
+			enqueuedPromise.trySuccess(resultPromise.future)
 		}
 	}
 
@@ -121,6 +128,9 @@ object UnitOfWork {
 	trait IsEnqueueOnly extends IgnoresFailure { self: HasEnqueuePromise[Unit] =>
 		final def enqueuedAsync() {
 			enqueuedPromise.success(())
+		}
+		final def tryEnqueuedAsync() {
+			enqueuedPromise.trySuccess(())
 		}
 	}
 

@@ -203,7 +203,7 @@ object Log {
 		}
 
 		def doLog(buf: LogBuffer, s: String) {
-			println(s)
+			// println(s)
 			val time = System.nanoTime()
 			var queue = buf.get.enqueue(time -> s)
 			if (queue.length > MAX_LOG_LINES) {

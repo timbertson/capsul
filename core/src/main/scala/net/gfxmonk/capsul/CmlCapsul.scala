@@ -63,7 +63,7 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 		}
 	}
 
-	@tailrec private def acknowledgeAndBuffer(alreadyCompleted: Int): Int = {
+	@tailrec private def acknowledgeAndBuffer(alreadyCompleted: Int, iterationsRemaining: Int): Int = {
 		val logId = Log.scope(self, "WorkLoop.acknowledgeAndBuffer")
 		val state = runState.get()
 
@@ -84,27 +84,33 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 					0
 				} else {
 					// conflict, retry
-					acknowledgeAndBuffer(alreadyCompleted)
+					acknowledgeAndBuffer(alreadyCompleted, iterationsRemaining)
 				}
 			}
 		} else {
-			// there were availableSyncTasks when we checked, but there's no harm in dequeueing extra
-			// tasks if they're there by the time we grab them
-			val dequeueLimit = limit - numFutures
 
-			// acknowledge new tasks _before_ decrementing state, to ensure enqueuer won't acknowledge tasks later in the queue
-			var acknowledgedSyncTasks = 0
-			while (acknowledgedSyncTasks == 0) {
-				// loop until we've acknowledged at least one task
-				log(s"dequeueing up to $dequeueLimit items into buffer (of $availableSyncTasks available, state = ${repr(state)})")
-				acknowledgedSyncTasks = dequeueIntoBuffer(0, dequeueLimit)
-				log(s"dequeued $acknowledgedSyncTasks items into buffer")
+			if (iterationsRemaining > 0) {
+				// there were availableSyncTasks when we checked, but there's no harm in dequeueing extra
+				// tasks if they're there by the time we grab them
+				val dequeueLimit = limit - numFutures
+				// acknowledge new tasks _before_ decrementing state, to ensure enqueuer won't acknowledge tasks later in the queue
+				var acknowledgedSyncTasks = 0
+				while (acknowledgedSyncTasks == 0) {
+					// loop until we've acknowledged at least one task
+					log(s"dequeueing up to $dequeueLimit items into buffer (of $availableSyncTasks available, state = ${repr(state)})")
+					acknowledgedSyncTasks = dequeueIntoBuffer(0, dequeueLimit)
+					log(s"dequeued $acknowledgedSyncTasks items into buffer")
+				}
+				if (alreadyCompleted != 0) {
+					log(s"decrementing runState by $alreadyCompleted (to ${numQueued(state) - alreadyCompleted})")
+					runState.addAndGet(-alreadyCompleted)
+				}
+				acknowledgedSyncTasks
+			} else {
+				log("trampolining to prevent starvation")
+				ec.execute(workLoop)
+				0
 			}
-			if (alreadyCompleted != 0) {
-				log(s"decrementing runState by $alreadyCompleted (to ${numQueued(state) - alreadyCompleted})")
-				runState.addAndGet(-alreadyCompleted)
-			}
-			acknowledgedSyncTasks
 		}
 	}
 
@@ -128,43 +134,43 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 		}
 	}
 
-	@tailrec private def runLoop(numTasks: Int) {
+	@tailrec private def runLoop(numCompleted: Int, iterationsRemaining: Int) {
 		val logId = Log.scope(self, "WorkLoop.runLoop")
-		// perform all acknowledged tasks
-		var taskIdx = 0
-		while (taskIdx < numTasks) {
-			// TODO: try to decrement state once fullyCompletedItems exceeds limit/2
-			// (also acknowledge more tasks as we go)
-			
-			var task = buffer(taskIdx)
-			task.run().filter(!_.isCompleted) match {
-				case None => {
-					log(s"ran sync node @ $taskIdx")
-				}
-				case Some(f) => {
-					log("ran async node")
-					self.runState.getAndAdd(SINGLE_FUTURE)
-					f.onComplete { _ =>
-						val prevState = self.runState.getAndAdd(-SINGLE_FUTURE)
-						assert(numFutures(prevState) <= limit)
-						log(s"one future completed in ${repr(prevState)}")
-						if (numFutures(prevState) == limit && numQueued(prevState) > 0) {
-							// we just freed up a slot to deque a pending task into. The loop
-							// was stopped (waiting for futures), so we should run it again
-							ec.execute(workLoop)
+
+		val numTasks = acknowledgeAndBuffer(alreadyCompleted = numCompleted, iterationsRemaining = iterationsRemaining)
+		log(s"After completing ${numCompleted}, there are ${numTasks} tasks acknowledged and ready to go")
+		if (numTasks > 0) {
+			// perform all acknowledged tasks
+			var taskIdx = 0
+			while (taskIdx < numTasks) {
+				// TODO: try to decrement state once fullyCompletedItems exceeds limit/2
+				// (also acknowledge more tasks as we go)
+				
+				var task = buffer(taskIdx)
+				task.run().filter(!_.isCompleted) match {
+					case None => {
+						log(s"ran sync node @ $taskIdx")
+					}
+					case Some(f) => {
+						log("ran async node")
+						self.runState.getAndAdd(SINGLE_FUTURE)
+						f.onComplete { _ =>
+							val prevState = self.runState.getAndAdd(-SINGLE_FUTURE)
+							assert(numFutures(prevState) <= limit)
+							log(s"one future completed in ${repr(prevState)}")
+							if (numFutures(prevState) == limit && numQueued(prevState) > 0) {
+								// we just freed up a slot to deque a pending task into. The loop
+								// was stopped (waiting for futures), so we should run it again
+								ec.execute(workLoop)
+							}
 						}
 					}
 				}
+				buffer.update(taskIdx, null) // enable GC
+				taskIdx += 1
 			}
-			buffer.update(taskIdx, null) // enable GC
-			taskIdx += 1
-		}
-
-		val newlyAcknowledgedTasks = acknowledgeAndBuffer(alreadyCompleted = numTasks)
-		log(s"After completing ${numTasks}, there are ${newlyAcknowledgedTasks} tasks acknowledged and ready to go")
-		if (newlyAcknowledgedTasks > 0) {
 			// do another loop
-			runLoop(newlyAcknowledgedTasks)
+			runLoop(numTasks, iterationsRemaining - numTasks)
 		}
 	}
 
@@ -172,12 +178,7 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 		final def run(): Unit = {
 			val logId = Log.scope(self, "WorkLoop")
 			log("start")
-			// TODO: trampoline somewhere in here...
-			// loop(1000)
-
-			var numTasks = acknowledgeAndBuffer(0)
-			assert(numTasks > 0) // shouldn't start loop unless tasks are ready
-			runLoop(numTasks)
+			runLoop(0, 1000)
 		}
 	}
 }

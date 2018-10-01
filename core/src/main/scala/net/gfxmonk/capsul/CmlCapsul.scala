@@ -47,6 +47,10 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 	// only need to read writes that happened earlier in the same thread
 	private var buffer = new Array[EnqueueableTask](limit)
 	private val self = this
+	private [capsul] def stateRepr = {
+		val state = runState.get()
+		(numFutures(state), numQueued(state))
+	}
 
 	override protected final def doEnqueue(task: EnqueueableTask): Boolean = {
 		queue.add(task)

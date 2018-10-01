@@ -18,10 +18,10 @@ import org.openjdk.jcstress.infra.results._
 	), expect = ACCEPTABLE,
 	desc = "enqueue excess sync item while completing an async item")
 @State
-class RingStressTest {
+class QueueStressTest {
 	import testsupport.Common._
 	implicit val ec = new CountingExecutionContext(defaultEc)
-	val executor = new RingbufferExecutor(bufLen)
+	val executor = new SimpleExecutor(bufLen)
 	def futureWork(f: Future[Unit]) = UnitOfWork.FullAsync(() => f)
 	def noopWork = UnitOfWork.Full(() => ())
 	def noopEnqueue = UnitOfWork.EnqueueOnly(() => ())
@@ -53,10 +53,8 @@ class RingStressTest {
 
 		@tailrec
 		def check(attempts: Int): String = {
-			var state = executor.stateRef.get
-			var numFutures = executor.numFuturesRef.get
-			val (head, tail, queued) = Ring.repr(state)
-			val desc = s"(head=$head, tail=$tail, queued=$queued, futures=${numFutures})"
+			val (numFutures, queued) = executor.stateRepr
+			val desc = s"(numFutures=$numFutures, queued=$queued)"
 
 			// println(s"attempt[$attempts], ${desc}")
 
@@ -65,9 +63,8 @@ class RingStressTest {
 			//  - it's not running
 			//  - head == tail (this should be covered by a stopped state, since we access state before head)
 			if (
-				Ring.isStopped(state) &&
 				numFutures == incompletePromises.length &&
-				Ring.tailIndex(state) == Ring.headIndex(state))
+				queued == 0)
 			{
 				// println(s"got it! isStopped = ${Ring.isStopped(state)} && ${numFutures} == ${incompletePromises.length} && ${Ring.tailIndex(state)} == $head  ;;;;  $desc")
 				desc

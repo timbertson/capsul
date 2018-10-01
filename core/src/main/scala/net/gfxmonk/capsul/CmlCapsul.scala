@@ -53,10 +53,12 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 	}
 
 	override protected final def doEnqueue(task: EnqueueableTask): Boolean = {
+		val logId = Log.scope(self, "doEnqueue")
 		queue.add(task)
 		val prevState = runState.getAndIncrement()
 		val numQueued = SimpleExecutor.numQueued(prevState)
 		val numFutures = SimpleExecutor.numFutures(prevState)
+		log(s"enqueued task $task on top of ${repr(prevState)}")
 		if ((numQueued + numFutures) < limit) {
 			if (numQueued == 0) {
 				ec.execute(workLoop)
@@ -73,15 +75,15 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 
 		// we can acknowledge up to limit tasks, minus outstanding futures
 		val numFutures = SimpleExecutor.numFutures(state)
-		val availableSyncTasks = Math.min(limit - numFutures, numQueued(state) - alreadyCompleted)
-		log(s"availableSyncTasks = $availableSyncTasks (from ${repr(state)}, with $alreadyCompleted already completed tasks")
-		if (availableSyncTasks == 0) {
+		val availableTasks = Math.min(limit - numFutures, numQueued(state) - alreadyCompleted)
+		log(s"availableTasks = $availableTasks (from ${repr(state)}, with $alreadyCompleted already completed tasks")
+		if (availableTasks == 0) {
 			if (alreadyCompleted == 0) {
 				// we're done, shut down
 				log(s"shutting down ...")
 				0
 			} else {
-				// nothing to do, but we've still got queued items
+				// nothing to do, but we've still got queued items to deduct
 				if (runState.compareAndSet(state, state - alreadyCompleted)) {
 					// no conflict, shut down
 					log(s"shutting down after CASing state...")
@@ -94,22 +96,27 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 		} else {
 
 			if (iterationsRemaining > 0) {
-				// there were availableSyncTasks when we checked, but there's no harm in dequeueing extra
+				// there were availableTasks when we checked, but there's no harm in dequeueing extra
 				// tasks if they're there by the time we grab them
-				val dequeueLimit = limit - numFutures
+				// val dequeueLimit = limit - numFutures
+				// TODO: can we use the above code, instead of the more conservative number below?
+				val dequeueLimit = availableTasks
 				// acknowledge new tasks _before_ decrementing state, to ensure enqueuer won't acknowledge tasks later in the queue
-				var acknowledgedSyncTasks = 0
-				while (acknowledgedSyncTasks == 0) {
+				var acknowledgedTasks = 0
+				var tries = 100
+				while (acknowledgedTasks == 0) {
+					tries -=1
+					assert(tries >0)
 					// loop until we've acknowledged at least one task
-					log(s"dequeueing up to $dequeueLimit items into buffer (of $availableSyncTasks available, state = ${repr(state)})")
-					acknowledgedSyncTasks = dequeueIntoBuffer(0, dequeueLimit)
-					log(s"dequeued $acknowledgedSyncTasks items into buffer")
+					log(s"dequeueing up to $dequeueLimit items into buffer (of $availableTasks available, state = ${repr(state)})")
+					acknowledgedTasks = dequeueIntoBuffer(0, dequeueLimit)
+					log(s"dequeued $acknowledgedTasks items into buffer")
 				}
 				if (alreadyCompleted != 0) {
 					log(s"decrementing runState by $alreadyCompleted (to ${numQueued(state) - alreadyCompleted})")
 					runState.addAndGet(-alreadyCompleted)
 				}
-				acknowledgedSyncTasks
+				acknowledgedTasks
 			} else {
 				log("trampolining to prevent starvation")
 				ec.execute(workLoop)
@@ -119,12 +126,12 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 	}
 
 	@tailrec private def dequeueIntoBuffer(index: Int, maxDequeue: Long): Int = {
-		val logId = Log.scope(self, "WorkLoop.dequeueIntoBuffer")
 		// returns num items dequeued
+		val logId = Log.scope(self, "WorkLoop.dequeueIntoBuffer")
 		val item = queue.poll()
-		log(s"dequeued item $item for buffer index $index")
+		log(s"dequeued item $item for buffer index $index (max=$maxDequeue)")
 		if (item != null) {
-			// TODO: can we do figure out when to use enqueuedAsync instead of tryEnqueuedAsync?
+			// TODO: can we figure out when to use enqueuedAsync instead of tryEnqueuedAsync?
 			item.tryEnqueuedAsync()
 			buffer.update(index, item)
 			val nextIndex = index + 1
@@ -138,11 +145,22 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 		}
 	}
 
+	// general flow:
+	// runLoop(0) ->
+	// - acknowledgeAndBuffer(alreadyCompleted = 0)
+	//   - checks max available tasks min(numQueued, limit - numFutures)
+	//   - dequeueIntoBuffer(0, maxAvailable)
+	//     - return number of _actual_ items dequeued (<= maxAvailable)
+	//   - ^ loop until nonzero
+	//   - decrement by alreadyCompleted (if nonzero)
+	//   - return number of dequeued tasks
+	//   - recurce runLoop(numTasks)
+
 	@tailrec private def runLoop(numCompleted: Int, iterationsRemaining: Int) {
 		val logId = Log.scope(self, "WorkLoop.runLoop")
 
 		val numTasks = acknowledgeAndBuffer(alreadyCompleted = numCompleted, iterationsRemaining = iterationsRemaining)
-		log(s"After completing ${numCompleted}, there are ${numTasks} tasks acknowledged and ready to go")
+		log(s"After completing ${numCompleted}, there are ${numTasks} tasks acknowledged and ready to go (limit $limit)")
 		if (numTasks > 0) {
 			// perform all acknowledged tasks
 			var taskIdx = 0
@@ -156,7 +174,7 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 						log(s"ran sync node @ $taskIdx")
 					}
 					case Some(f) => {
-						log("ran async node")
+						log(s"ran async node @ $taskIdx")
 						self.runState.getAndAdd(SINGLE_FUTURE)
 						f.onComplete { _ =>
 							val prevState = self.runState.getAndAdd(-SINGLE_FUTURE)

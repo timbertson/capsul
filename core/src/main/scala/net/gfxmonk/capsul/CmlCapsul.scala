@@ -58,7 +58,7 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 		val prevState = runState.getAndIncrement()
 		val numQueued = SimpleExecutor.numQueued(prevState)
 		val numFutures = SimpleExecutor.numFutures(prevState)
-		log(s"enqueued task $task on top of ${repr(prevState)}")
+		log(s"enqueued task $task on top of ${repr(prevState)}, queue size is ${queue.size()}")
 		if ((numQueued + numFutures) < limit) {
 			if (numQueued == 0) {
 				ec.execute(workLoop)
@@ -103,10 +103,11 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 				val dequeueLimit = availableTasks
 				// acknowledge new tasks _before_ decrementing state, to ensure enqueuer won't acknowledge tasks later in the queue
 				var acknowledgedTasks = 0
-				var tries = 100
+				// var tries = 100
+				log(s"queue size is ${queue.size()}")
 				while (acknowledgedTasks == 0) {
-					tries -=1
-					assert(tries >0)
+					// tries -=1
+					// assert(tries >0)
 					// loop until we've acknowledged at least one task
 					log(s"dequeueing up to $dequeueLimit items into buffer (of $availableTasks available, state = ${repr(state)})")
 					acknowledgedTasks = dequeueIntoBuffer(0, dequeueLimit)
@@ -119,6 +120,7 @@ class SimpleExecutor[T](val limit: Int)(implicit ec: ExecutionContext) extends S
 				acknowledgedTasks
 			} else {
 				log("trampolining to prevent starvation")
+				runState.addAndGet(-alreadyCompleted)
 				ec.execute(workLoop)
 				0
 			}

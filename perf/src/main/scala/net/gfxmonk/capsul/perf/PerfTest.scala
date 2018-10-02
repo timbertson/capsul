@@ -541,8 +541,8 @@ class PerfTest {
 	}
 
 	def main(): Unit = {
-		// val repeat = this.repeat(500, warmups=100) _
-		val repeat = this.repeat(10, warmups=0) _
+		val repeat = this.repeat(500, warmups=100) _
+		// val repeat = this.repeat(10, warmups=0) _
 		val countLimit = 10000
 		val largePipeline = PipelineConfig(
 			stages = 10,
@@ -574,7 +574,8 @@ class PerfTest {
 		repeat("counter", List(
 			"SimpleCapsul (unbounded) counter" -> (() => SimpleCounterState.run(countLimit)),
 			"Capsul (unbounded) counter" -> (() => CounterState.run(countLimit, bufLen = bufLen)),
-			"Capsul (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen)),
+			"Capsul (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, bufLen = bufLen))
+			,
 			"Akka counter" -> (() => CounterActor.run(countLimit)),
 			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
 		))

@@ -17,8 +17,8 @@ private [capsul] class LogCtx(id: String, val buf: Log.LogBuffer) {
 }
 
 object Log {
-	val ENABLE = true; type Ctx = LogCtx
-	// val ENABLE = false; type Ctx = Unit
+	// val ENABLE = true; type Ctx = LogCtx
+	val ENABLE = false; type Ctx = Unit
 
 	val MAX_LOG_LINES = 1000
 	type LogEntry = (Long,String)

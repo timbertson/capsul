@@ -1,9 +1,7 @@
 package net.gfxmonk.capsul.perf
 import net.gfxmonk.capsul._
+import net.gfxmonk.capsul.mini
 
-import monix.eval.Task
-import monix.execution.atomic.{Atomic, AtomicAny}
-import monix.execution.misc.NonFatal
 import java.util.concurrent.{Executors, TimeUnit, ForkJoinPool}
 import java.util.concurrent.locks.LockSupport
 import internal.Log
@@ -199,7 +197,7 @@ object CounterState {
 
 object SimpleCounterState {
 	def run(n: Int)(implicit ec: ExecutionContext): Future[Int] = {
-		val counter = SimpleCapsul(0)
+		val counter = mini.Capsul(0)
 		var limit = n
 		while(limit > 0) {
 			counter.transform(_+1)

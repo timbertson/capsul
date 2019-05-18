@@ -1,12 +1,11 @@
 package net.gfxmonk.capsul.mini
 
-import java.util.concurrent.{ConcurrentLinkedQueue, LinkedBlockingQueue}
-import java.util.concurrent.atomic.AtomicLong
 import java.util
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.{ConcurrentLinkedQueue, LinkedBlockingQueue}
 
 import scala.annotation.tailrec
-import scala.concurrent.{ExecutionContext, Future, Promise}
-import scala.util.control.NonFatal
+import scala.concurrent.{ExecutionContext, Future}
 
 /** A wrapper for getting / setting state */
 class Ref[T](init:T) {
@@ -38,7 +37,7 @@ Methods are named <dispatch><operation>
 == Dispatch types: ==
 
  - '''send''':   Enqueue an action, returning [[Unit]]. Enqueued items will be executed in the
-                 order they are enqueued.
+								 order they are enqueued.
 
  - '''(none)''': Perform an action, returning a [[Future]][T] which completes with the action's result.
 
@@ -48,9 +47,9 @@ Methods are named <dispatch><operation>
  - '''transform''': accepts a function of type `T => T`, returns [[Unit]]
  - '''set''':       accepts a new value of type `T`, returns [[Unit]]
  - '''access''':    accepts a function of type `T => R`, returns `R`.
-                    The function is executed sequentually with other tasks,
-                    so it's safe to mutate `T`. If you simply want to get
-                    the current vaue without blocking other tasks, use [[current]].
+										The function is executed sequentually with other tasks,
+										so it's safe to mutate `T`. If you simply want to get
+										the current vaue without blocking other tasks, use [[current]].
 
 */
 class Capsul[T](init: T, thread: SequentialExecutor) {
@@ -58,27 +57,27 @@ class Capsul[T](init: T, thread: SequentialExecutor) {
 
 	/** Send a pure transformation */
 	def sendTransform(fn: T => T): Unit =
-		thread.enqueueOnly(new Tell(() => state.set(fn(state.current))))
+		thread.enqueueOnly(new WorkIgnore(() => state.set(fn(state.current))))
 
 	/** Send a set operation */
 	def sendSet(updated: T): Unit =
-		thread.enqueueOnly(new Tell(() => state.set(updated)))
+		thread.enqueueOnly(new WorkIgnore(() => state.set(updated)))
 
 	/** Send an access operation */
 	def sendAccess(fn: T => _): Unit =
-		thread.enqueueOnly(new Tell(() => fn(state.current)))
+		thread.enqueueOnly(new WorkIgnore(() => fn(state.current)))
 
 	/** Return the current state value */
 	def current: Future[T] =
-		thread.enqueue(new Ask(() => state.current))
+		thread.enqueue(new WorkReturn(() => state.current))
 
 	/** Perform a full mutation */
 	def mutate[R](fn: Ref[T] => R): Future[R] =
-		thread.enqueue(new Ask(() => fn(state)))
+		thread.enqueue(new WorkReturn(() => fn(state)))
 
 	/** Perform a pure transformation */
 	def transform(fn: T => T): Future[T] =
-		thread.enqueue(new Ask(() => {
+		thread.enqueue(new WorkReturn(() => {
 			val updated = fn(state.current)
 			state.set(updated)
 			updated
@@ -86,61 +85,30 @@ class Capsul[T](init: T, thread: SequentialExecutor) {
 
 	/** Perform a function with the current state */
 	def access[R](fn: T => R): Future[R] =
-		thread.enqueue(new Ask(() => fn(state.current)))
-}
-
-
-private[capsul] trait EnqueueableTask {
-	def run(): Unit
-}
-
-private [capsul] case class Tell[A](fn: Function0[A]) extends EnqueueableTask {
-	final override def run(): Unit = {
-		try {
-			fn()
-		} catch {
-			case NonFatal(error) => {
-				Console.err.println(s"Uncaught error in enqueued task: $error")
-				error.printStackTrace()
-			}
-		}
-	}
-}
-
-private [capsul] case class Ask[A](fn: Function0[A]) extends EnqueueableTask {
-	val resultPromise: Promise[A] = Promise[A]()
-	final override def run(): Unit = {
-		try {
-			resultPromise.success(fn())
-		} catch {
-			case NonFatal(error) => {
-				resultPromise.failure(error)
-			}
-		}
-	}
+		thread.enqueue(new WorkReturn(() => fn(state.current)))
 }
 
 object SequentialExecutor {
 	private [capsul] def unbounded()(implicit ec: ExecutionContext) =
-		new SequentialExecutor(new ConcurrentLinkedQueue[EnqueueableTask]())
+		new SequentialExecutor(new ConcurrentLinkedQueue[Work]())
 
 	private [capsul] def bounded(bufLen: Int)(implicit ec: ExecutionContext) =
-		new SequentialExecutor(new LinkedBlockingQueue[EnqueueableTask](bufLen))
+		new SequentialExecutor(new LinkedBlockingQueue[Work](bufLen))
 }
 
-class SequentialExecutor(queue: util.Queue[EnqueueableTask])(implicit ec: ExecutionContext) {
+class SequentialExecutor(queue: util.Queue[Work])(implicit ec: ExecutionContext) {
 	private [capsul] val stateRef = new AtomicLong(0)
 
-	def enqueueOnly[R](task: Tell[_]): Unit = {
+	def enqueueOnly[R](task: WorkIgnore[_]): Unit = {
 		doEnqueue(task)
 	}
 
-	def enqueue[R](task: Ask[R]): Future[R] = {
+	def enqueue[R](task: WorkReturn[R]): Future[R] = {
 		doEnqueue(task)
 		task.resultPromise.future
 	}
 
-	private def doEnqueue(work: EnqueueableTask) {
+	private def doEnqueue(work: Work) {
 		queue.add(work)
 		val state = stateRef.getAndIncrement()
 		// if state was 0, run loop
@@ -149,7 +117,7 @@ class SequentialExecutor(queue: util.Queue[EnqueueableTask])(implicit ec: Execut
 		}
 	}
 
-	// A runnable which reepeatedly consumes & runs items in the queue until it's empty
+	// A runnable which repeatedly consumes & runs items in the queue until it's empty
 	val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
 			loop(1000)

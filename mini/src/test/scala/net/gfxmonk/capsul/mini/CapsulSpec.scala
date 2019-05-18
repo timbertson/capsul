@@ -51,8 +51,8 @@ object SequentialExecutorSpec {
 			count.current
 		}
 
-		def inc(sleep: Int = 10): Ask[Int] = {
-			new Ask(() => doInc(sleep))
+		def inc(sleep: Int = 10): WorkReturn[Int] = {
+			new WorkReturn(() => doInc(sleep))
 		}
 	}
 

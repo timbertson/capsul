@@ -18,8 +18,11 @@ val commonSettings = Seq(
   description := "Minimal, thread-safe state encapsulation",
   version := "0.3.0",
 
-  /* libraryDependencies += "io.monix" %% "monix-execution" % monixVersion, */
-  libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
+  libraryDependencies ++= Seq(
+    "io.monix" %% "monix-execution" % monixVersion,
+    "io.monix" %% "monix-eval" % monixVersion,
+    "org.scalatest" %% "scalatest" % "3.0.1" % "test"
+  )
 )
 
 enablePlugins(JCStressPlugin)
@@ -86,7 +89,8 @@ lazy val core = (project in file("core")).settings(
 lazy val mini = (project in file("mini")).settings(
   commonSettings,
   name := "capsul-mini",
-  /* publicProjectSettings */
+	libraryDependencies += "org.scalacheck" %% "scalacheck" % "1.14.0" % "test"
+	/* publicProjectSettings */
 ).dependsOn(core % "test")
 
 lazy val perf = (project in file("perf")).settings(
@@ -94,7 +98,7 @@ lazy val perf = (project in file("perf")).settings(
   libraryDependencies += "io.monix" %% "monix" % monixVersion,
   libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion,
   name := "capsul-perf"
-).dependsOn(core).dependsOn(log)
+).dependsOn(core).dependsOn(log).dependsOn(mini)
 
 lazy val stress = (project in file("stress")).settings(
   hiddenProject,

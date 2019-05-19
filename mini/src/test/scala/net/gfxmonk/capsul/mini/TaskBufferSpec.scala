@@ -1,15 +1,15 @@
 package net.gfxmonk.capsul.mini
 
-import monix.eval.Task
 import monix.execution.Scheduler
 import monix.execution.atomic.AtomicInt
 import org.scalatest.concurrent.TimeLimitedTests
 import org.scalatest.prop.PropertyChecks
 import org.scalatest.{FunSpec, Matchers}
 
+import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 
-class BackpressureSpec extends FunSpec with TimeLimitedTests with Matchers with PropertyChecks {
+class TaskBufferSpec extends FunSpec with TimeLimitedTests with Matchers with PropertyChecks {
 	val timeLimit = 5.seconds
 
 	it("represents states correctly") {
@@ -22,7 +22,7 @@ class BackpressureSpec extends FunSpec with TimeLimitedTests with Matchers with 
 
 	it("limits running tasks to $capacity") {
 		val capacity = 4
-		implicit val _ = Scheduler.fixedPool("test", capacity*2)
+		implicit val _: ExecutionContext = Scheduler.fixedPool("test", capacity*2)
 		def pause() { Thread.sleep(100) }
 		val nextIndex = AtomicInt(0)
 		val waiting = AtomicInt(0)
@@ -33,7 +33,7 @@ class BackpressureSpec extends FunSpec with TimeLimitedTests with Matchers with 
 		val wait = synchronized(_.wait()) _
 		val notify = synchronized(_.notify()) _
 
-		val task = Task {
+		val task = () => Future {
 			val idx = nextIndex.getAndIncrement()
 			waiting.increment()
 			try {

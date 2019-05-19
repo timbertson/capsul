@@ -1,9 +1,6 @@
 package net.gfxmonk.capsul.mini
 
-import monix.eval.Task
-import monix.execution.Scheduler
-
-import scala.concurrent.{Future, Promise}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 
 trait Work {
@@ -11,40 +8,40 @@ trait Work {
 }
 
 trait AsyncWork {
-	def runAsync(onComplete: Function0[Unit], schedulr: Scheduler): Unit
+	def runAsync(onComplete: Function0[Unit], ec: ExecutionContext): Unit
 }
 
-private class AsyncWorkIgnore[T](val task: Task[T]) extends AsyncWork {
+private class AsyncWorkIgnore[T](val task: Function0[Future[T]]) extends AsyncWork {
 	val enqueuedPromise = Promise[Unit]()
-	override def runAsync(onComplete: Function0[Unit], scheduler: Scheduler): Unit = {
+	override def runAsync(onComplete: Function0[Unit], ec: ExecutionContext): Unit = {
 		enqueuedPromise.success(())
-		AsyncWorkIgnore.runAsync(task, onComplete, scheduler)
+		AsyncWorkIgnore.runAsync(task, onComplete, ec)
 	}
 }
 
 object AsyncWorkIgnore {
-	def runAsync[T](task: Task[T], onComplete: Function0[Unit], scheduler: Scheduler): Unit = {
-		task.runOnComplete { result =>
+	def runAsync[T](task: Function0[Future[T]], onComplete: Function0[Unit], ec: ExecutionContext): Unit = {
+		task().onComplete { result =>
 			onComplete()
-		}(scheduler)
+		}(ec)
 	}
 }
 
-private [capsul] class AsyncWorkReturn[T](val task: Task[T], promise: Promise[T]) extends AsyncWork {
+private [capsul] class AsyncWorkReturn[T](val task: Function0[Future[T]], promise: Promise[T]) extends AsyncWork {
 	val enqueuedPromise = Promise[Future[T]]()
 
-	override def runAsync(onComplete: Function0[Unit], scheduler: Scheduler): Unit = {
-		AsyncWorkReturn.runAsync(task, promise, onComplete, scheduler)
+	override def runAsync(onComplete: Function0[Unit], ec: ExecutionContext): Unit = {
+		AsyncWorkReturn.runAsync(task, promise, onComplete, ec)
 		enqueuedPromise.success(promise.future)
 	}
 }
 
 private [capsul] object AsyncWorkReturn {
-	def runAsync[T](task: Task[T], promise: Promise[T], onComplete: Function0[Unit], scheduler: Scheduler): Unit = {
-		task.runOnComplete { result =>
+	def runAsync[T](task: Function0[Future[T]], promise: Promise[T], onComplete: Function0[Unit], ec: ExecutionContext): Unit = {
+		task().onComplete { result =>
 			onComplete()
 			promise.complete(result)
-		}(scheduler)
+		}(ec)
 	}
 }
 

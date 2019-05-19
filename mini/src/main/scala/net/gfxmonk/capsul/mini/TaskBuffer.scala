@@ -3,12 +3,11 @@ package net.gfxmonk.capsul.mini
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.locks.LockSupport
 
-import monix.eval.Task
 import monix.execution.Scheduler
 import monix.execution.atomic.AtomicLong
 
 import scala.annotation.tailrec
-import scala.concurrent.{Future, Promise}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 private [capsul] object State {
 	// State is stored as a uint64.
@@ -31,18 +30,18 @@ private [capsul] object State {
 	def numQueued(t:State):Long = t & QUEUED_MASK
 }
 
-class TaskBuffer(capacity: Int, scheduler: Scheduler) {
-	def enqueue[T](f: Task[T]): Future[Unit] = enqueueOnly(f)
-	def result[T](f: Task[T]): Future[T] = enqueueResult(f).flatten
-	def run[T](f: Task[T]): Future[Future[T]] = enqueueResult(f)
+class TaskBuffer(capacity: Int, ec: ExecutionContext) {
+	def enqueue[T](f: Function0[Future[T]]): Future[Unit] = enqueueOnly(f)
+	def result[T](f: Function0[Future[T]]): Future[T] = enqueueResult(f).flatten
+	def run[T](f: Function0[Future[T]]): Future[Future[T]] = enqueueResult(f)
 
 	private var stateRef = State.ref(State.make(0,0))
 	private val pending = new ConcurrentLinkedQueue[AsyncWork]()
 
-	def enqueueOnly[T](task: Task[T]): Future[Unit] = {
+	private def enqueueOnly[T](task: Function0[Future[T]]): Future[Unit] = {
 		if (doEnqueue(task)) {
 			// run immediately
-			AsyncWorkIgnore.runAsync(task, didCompleteWork, scheduler)
+			AsyncWorkIgnore.runAsync(task, didCompleteWork, ec)
 			Future.unit
 		} else {
 			// over capacity, enqueue
@@ -52,10 +51,10 @@ class TaskBuffer(capacity: Int, scheduler: Scheduler) {
 		}
 	}
 
-	def enqueueResult[T](task: Task[T]): Future[Future[T]] = {
+	private def enqueueResult[T](task: Function0[Future[T]]): Future[Future[T]] = {
 		val promise = Promise[T]()
 		if (doEnqueue(task)) {
-			AsyncWorkReturn.runAsync(task, promise, didCompleteWork, scheduler)
+			AsyncWorkReturn.runAsync(task, promise, didCompleteWork, ec)
 			Future.successful(promise.future)
 		} else {
 			// over capacity, enqueue
@@ -65,7 +64,7 @@ class TaskBuffer(capacity: Int, scheduler: Scheduler) {
 		}
 	}
 
-	private def doEnqueue[T](task: Task[T]): Boolean = {
+	private def doEnqueue[T](task: Function0[Future[T]]): Boolean = {
 		val prevState = stateRef.getAndTransform { state =>
 			val running = State.numRunning(state)
 			val queued = State.numQueued(state)
@@ -99,7 +98,7 @@ class TaskBuffer(capacity: Int, scheduler: Scheduler) {
 					LockSupport.parkNanos(0)
 					dequeue()
 				} else {
-					work.runAsync(didCompleteWork, scheduler)
+					work.runAsync(didCompleteWork, ec)
 				}
 			}
 			dequeue()
@@ -108,5 +107,5 @@ class TaskBuffer(capacity: Int, scheduler: Scheduler) {
 }
 
 object TaskBuffer {
-	def apply(capacity: Int)(implicit s: Scheduler) = new TaskBuffer(capacity, s)
+	def apply(capacity: Int)(implicit ec: ExecutionContext) = new TaskBuffer(capacity, ec)
 }

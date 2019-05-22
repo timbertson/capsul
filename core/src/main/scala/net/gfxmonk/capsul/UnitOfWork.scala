@@ -1,7 +1,8 @@
 package net.gfxmonk.capsul
 
-import scala.util.control.NonFatal
+import net.gfxmonk.capsul.UnitOfWork.HasEnqueuePromise
 
+import scala.util.control.NonFatal
 import scala.concurrent.{ExecutionContext, Future, Promise}
 
 trait EnqueueableTask {
@@ -9,6 +10,11 @@ trait EnqueueableTask {
 	// care about the type parameter in UnitOfWork
 	def enqueuedAsync(): Unit
 	def run(): Option[Future[_]]
+}
+
+trait AsyncTask extends EnqueueableTask {
+	def runAsync(): Future[_]
+	def isComplete: Boolean
 }
 
 trait UnitOfWork[A] extends EnqueueableTask {
@@ -96,6 +102,11 @@ object UnitOfWork {
 			result.onComplete(resultPromise.complete)(ec)
 			Some(result)
 		}
+
+		final def reportSuccessAsync(result: Future[A]): Future[_] = {
+			result.onComplete(resultPromise.complete)(ec)
+			result
+		}
 	}
 
 	case class FullStaged[A](fn: Function0[StagedFuture[A]])(implicit protected val ec: ExecutionContext)
@@ -115,7 +126,19 @@ object UnitOfWork {
 			with HasResultPromise[A]
 			with HasEnqueueAndResultPromise[A]
 			with HasFutureResult[A]
+			with AsyncTask
 	{
+		override final def runAsync(): Future[_] = {
+			try {
+				reportSuccessAsync(fn())
+			} catch {
+				case NonFatal(e) => {
+					reportFailure(e).get
+				}
+			}
+		}
+
+		override def isComplete: Boolean = ???
 	}
 
 	trait IsEnqueueOnly extends IgnoresFailure { self: HasEnqueuePromise[Unit] =>
@@ -144,11 +167,17 @@ object UnitOfWork {
 
 	case class EnqueueOnlyAsync[A](fn: Function0[Future[A]])
 		extends UnitOfWork[Future[A]]
+		with AsyncTask
 		with HasEnqueuePromise[Unit]
 		with IsEnqueueOnly
 	{
 		final def reportSuccess(f: Future[A]): Option[Future[_]] = {
 			Some(f)
 		}
+
+	// TODO: useless interface
+		override def runAsync(): Future[_] = fn()
+
+		override def isComplete: Boolean = ???
 	}
 }

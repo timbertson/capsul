@@ -84,6 +84,7 @@ lazy val core = (project in file("core")).settings(
   /* libraryDependencies += scalaReflect, */
   name := "capsul",
   publicProjectSettings,
+	libraryDependencies += "org.scalacheck" %% "scalacheck" % "1.14.0" % "test"
 ).dependsOn(log % "compile-internal").dependsOn(log % "test")
 
 lazy val mini = (project in file("mini")).settings(

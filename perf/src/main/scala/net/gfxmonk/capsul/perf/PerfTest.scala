@@ -16,6 +16,7 @@ import akka.util.Timeout
 import akka.actor.{Actor, ActorRef, ActorSystem}
 import akka.stream.{ActorMaterializer, Materializer}
 import net.gfxmonk.capsul.mini.TaskBuffer
+import net.gfxmonk.capsul.mini2.BackpressureExecutor
 
 object Sleep {
 	def jittered(base: Float, jitter: Float) = {
@@ -208,7 +209,7 @@ object SimpleCounterState {
 
 	def runWithBackpressure(limit: Int, bufLen: Int)(implicit ec: ExecutionContext): Future[Int] = {
 		val counter = mini.Capsul(0)
-		val buffer = TaskBuffer(bufLen)
+		val buffer = BackpressureExecutor(bufLen)
 		val result = Promise[Int]()
 		def loop(limit: Int): Unit = {
 			if (limit == 0) {

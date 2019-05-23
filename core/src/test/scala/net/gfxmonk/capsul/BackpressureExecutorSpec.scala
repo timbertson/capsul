@@ -59,7 +59,7 @@ class TaskBufferSpec extends FunSpec with TimeLimitedTests with Matchers with Pr
 		}
 
 		val bp = BackpressureExecutor(capacity)
-		val futures: List[Future[Future[Int]]] = Range(0, capacity+1).map(_ => bp.run(task)).toList
+		val futures: List[Future[Future[Int]]] = Range(0, capacity+1).map(_ => bp.run(task).flatten).toList
 		def futuresCompleted =
 			futures.map(_.value.map(_.get.isCompleted))
 		def futureValues =

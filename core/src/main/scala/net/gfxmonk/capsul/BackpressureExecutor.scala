@@ -166,7 +166,7 @@ private [capsul] class Ring[T >: Null <: AnyRef](size: Int) {
 
 object BackpressureExecutor {
 	val defaultBufferSize = 10
-	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new BackpressureExecutor(bufLen, Unordered)
+	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new BackpressureExecutor(bufLen)
 	private val successfulUnit = Future.successful(())
 }
 
@@ -174,7 +174,7 @@ sealed trait CompletionMode
 case object Ordered extends CompletionMode
 case object Unordered extends CompletionMode
 
-class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit ec: ExecutionContext) {
+class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	private [capsul] val ring = new Ring[AsyncTask](bufLen)
 	private [capsul] val queue = new ConcurrentLinkedQueue[AsyncTask]()
 	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0, false))
@@ -183,11 +183,20 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 	import Ring._
 
 	// TODO decide on API
-	def enqueue[R](fn: Function0[Future[R]]): Future[Unit] = {
-		enqueueOnly(UnitOfWork.EnqueueOnlyAsync(fn))
+	def sendAsync[R](fn: Function0[Future[R]]): Future[Unit] = {
+		enqueueOnly(UnitOfWork.BackpressureEnqueueOnlyAsync(fn))
 	}
-	def run[R](fn: Function0[Future[R]]): Future[Future[R]] = {
-		enqueue(UnitOfWork.FullAsync(fn))
+	def send[R](fn: Function0[_]): Future[Unit] = {
+		enqueueOnly(UnitOfWork.BackpressureEnqueueOnly(fn))
+	}
+	def run[R](fn: Function0[R]): Future[Future[R]] = {
+		enqueue(UnitOfWork.BackpressureFull(fn))
+	}
+	def runAsync[R](fn: Function0[Future[R]]): Future[Future[R]] = {
+		enqueue(UnitOfWork.BackpressureFullAsync(fn))
+	}
+	def flatRunAsync[R](fn: Function0[Future[Future[R]]]): Future[Future[R]] = {
+		enqueue(UnitOfWork.BackpressureFullAsync(fn)).flatten
 	}
 
 	def enqueueOnly[R](task: AsyncTask with HasEnqueuePromise[Unit]): Future[Unit] = {
@@ -248,9 +257,10 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 			val prevTail = Ring.tailIndex(state)
 			val nextIdx:Idx = dequeueItemsInto(prevTail, numDequeue)
 			if (hasSpaceForWork) {
-				log(s"inserting work into $nextIdx")
+				log(s"enqueue: setting item @ slot idx $nextIdx after dequeueing $numDequeue (${Ring.repr(nextState)})}")
 				ring.at(nextIdx).set(work)
 			} else {
+				log(s"dequeued $numDequeue pending items; queueing work due to full buffer (${Ring.repr(nextState)})}")
 				// we reserved a `queued` slot, so populate that
 				queue.add(work)
 			}
@@ -265,21 +275,22 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 	private def dequeueItemsInto(dest: Idx, numItems: Int): Idx = {
 		val logId = Log.scope(this, s"dequeueItemsInto($dest, $numItems)")
 		var idx = dest
-		var n = numItems
-		while(n > 0) {
+		var nextTail = ring.add(dest, numItems)
+		while(idx != nextTail) {
 			var queued = queue.poll()
 			while (queued == null) {
 				// spinloop, since reserved (but un-populated) slots
 				// in the ring will hold up the executor (and we
 				// also run this from the executor)
+				log(s"awaiting item @ slot idx $idx")
 				queued = queue.poll()
 			}
+			log(s"dequeueing item @ slot idx $idx")
 			ring.at(idx).set(queued)
 			queued.enqueuedAsync()
 			idx = ring.inc(idx)
-			n -= 1
 		}
-		idx
+		nextTail
 	}
 
 	// A runnable which repeatedly consumes & runs items in
@@ -287,10 +298,7 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 	private val self = this
 	val workLoop: Runnable = new Runnable() {
 		@volatile private var nextTaskIndex: Int = 0
-		private val completionFn: Function0[Unit] = completionMode match {
-			case Ordered => completeFromHead
-			case Unordered => completeUnordered
-		}
+		private val completionFn: Function1[Any,Unit] = _ => completeUnordered(1)
 
 		final def run(): Unit = {
 			loop(1000, nextTaskIndex)
@@ -306,6 +314,7 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 			val logId = Log.scope(self, "WorkLoop.runBatch")
 			val currentTail = Ring.tailIndex(state)
 			val readyItems = ring.numItems(headIndex, currentTail)
+			var completedSync = 0
 
 			// There must be something pending. Only this loop updates nextTaskIndex, and
 			// it terminates if the ring becomes empty
@@ -313,21 +322,36 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 			var currentHead = headIndex
 			log(s"workLoop: ${Ring.repr(state)}, head = $currentHead, tail = $currentTail")
 			while (currentHead != currentTail) {
-				log(s"executing item @ $currentHead")
+				log(s"loading item @ slot idx $currentHead")
 				val slot = ring.at(currentHead)
 				var item = slot.get
 
+				var lastLog = System.currentTimeMillis()
 				while(item == null) {
 					// spin waiting for item to be set
 					item = slot.get
+					val now = System.currentTimeMillis()
+					if (lastLog + 1000 < now) {
+						lastLog = now
+						log(s"still waiting for slot $currentHead")
+					}
+				}
+				log(s"running item @ slot idx $currentHead")
+
+				// TODO can't null this early if completionMode is Ordered
+				log(s"nulling item")
+				slot.set(null)
+
+				log(s"evaluating item on thread ${Thread.currentThread.getId}")
+				if (item.spawn(completionFn)) {
+					// already done, can complete syn
+					completedSync += 1
 				}
 
-				runItem(item)
-				if (completionMode == Unordered) {
-					// TODO make nice
-					slot.set(null)
-				}
 				currentHead = ring.inc(currentHead)
+			}
+			if (completedSync > 0) {
+				completeUnordered(completedSync)
 			}
 			readyItems
 		}
@@ -359,34 +383,25 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 			}
 		}
 
-		private def runItem(item: AsyncTask): Unit = {
-			val f = item.runAsync()
-			if (f.isCompleted) {
-				completionFn()
-			} else {
-				f.onComplete { _ =>
-					completionFn()
-				}
-			}
-		}
-
-		private def completeFromHead(): Unit = {
-			val state = stateRef.get
-			val (didCompleteAny, finalState) = _completeFromHead(state, false)
-			if (didCompleteAny) {
-				tryDequeue(finalState)
-			}
-		}
+//		private def completeFromHead(): Unit = {
+//			val state = stateRef.get
+//			val (didCompleteAny, finalState) = _completeFromHead(state, false)
+//			if (didCompleteAny) {
+//				tryDequeue(finalState)
+//			}
+//		}
 
 		@tailrec
-		private def completeUnordered(): Unit = {
+		private def completeUnordered(n: Int): Unit = {
+			val logId = Log.scope(self, "WorkLoop.completeUnordered")
 			val state = stateRef.get
-			val nextState = Ring.setHead(state, ring.inc(Ring.headIndex(state)))
+			val nextState = Ring.setHead(state, ring.add(Ring.headIndex(state), n))
 			if (stateRef.compareAndSet(state, nextState)) {
+				log(s"updated state to ${Ring.repr(nextState)}, attempting dequeue")
 				tryDequeue(nextState)
 			} else {
 				// CAS fail, try again
-				completeUnordered()
+				completeUnordered(n)
 			}
 		}
 
@@ -406,6 +421,7 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 					// either we reserve `numQueued+1` slots, or we dequeue as many as we can and add one queued
 					val nextState = ring.dequeue(state, numDequeue, 0)
 					if (stateRef.compareAndSet(state, nextState)) {
+						log(s"reserved $numDequeue slots, populating them (${Ring.repr(nextState)})")
 						// We reserved all the slots we asked for, now assign into those slots
 						// log(s"reserved ${numDequeue} dequeue and ${extraSlots} extra slots from ${Ring.tailIndex(state)}")
 						val prevTail = Ring.tailIndex(state)
@@ -424,32 +440,32 @@ class BackpressureExecutor(bufLen: Int, completionMode: CompletionMode)(implicit
 			}
 		}
 
-		@tailrec
-		private def _completeFromHead(state: Ring.State, didCompleteAny: Boolean): (Boolean, Ring.State) = {
-			// "The fish completes from the head down..."
-			// NOTE: may be called from any thread
-			val headIndex = Ring.headIndex(state)
-			val tailIndex = Ring.tailIndex(state)
-			if (headIndex == tailIndex) {
-				// empty ring
-				(didCompleteAny, state)
-			} else {
-				val item = ring.at(headIndex).get
-				val nextHead = ring.inc(headIndex)
-				if (item != null && item.isComplete) {
-					val nextState = Ring.make(nextHead, tailIndex, Ring.numQueued(state), Ring.isRunning(state))
-					if (stateRef.compareAndSet(state, nextState)) {
-						// done! try another
-						_completeFromHead(nextState, true)
-					} else {
-						// CAS fail, try again
-						_completeFromHead(stateRef.get, didCompleteAny)
-					}
-				} else {
-					// incomplete item, stop there
-					(didCompleteAny, state)
-				}
-			}
-		}
+//		@tailrec
+//		private def _completeFromHead(state: Ring.State, didCompleteAny: Boolean): (Boolean, Ring.State) = {
+//			// "The fish completes from the head down..."
+//			// NOTE: may be called from any thread
+//			val headIndex = Ring.headIndex(state)
+//			val tailIndex = Ring.tailIndex(state)
+//			if (headIndex == tailIndex) {
+//				// empty ring
+//				(didCompleteAny, state)
+//			} else {
+//				val item = ring.at(headIndex).get
+//				val nextHead = ring.inc(headIndex)
+//				if (item != null && item.isComplete) {
+//					val nextState = Ring.make(nextHead, tailIndex, Ring.numQueued(state), Ring.isRunning(state))
+//					if (stateRef.compareAndSet(state, nextState)) {
+//						// done! try another
+//						_completeFromHead(nextState, true)
+//					} else {
+//						// CAS fail, try again
+//						_completeFromHead(stateRef.get, didCompleteAny)
+//					}
+//				} else {
+//					// incomplete item, stop there
+//					(didCompleteAny, state)
+//				}
+//			}
+//		}
 	}
 }

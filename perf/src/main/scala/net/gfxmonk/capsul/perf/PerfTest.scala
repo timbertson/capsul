@@ -208,17 +208,22 @@ object SimpleCounterState {
 	}
 
 	def runWithBackpressure(limit: Int, bufLen: Int)(implicit ec: ExecutionContext): Future[Int] = {
-		val counter = mini.Capsul(0)
+//		val counter = mini.Capsul(0)
+		import Log._
+		val counter = new Ref(0)
 		val buffer = BackpressureExecutor(bufLen)
 		val result = Promise[Int]()
 		def loop(limit: Int): Unit = {
 			if (limit == 0) {
-				counter.current.onComplete(result.complete)
+				buffer.send { () =>
+					result.success(counter.current)
+				}
 			} else {
-				buffer.enqueue { () =>
-					counter.transform(_ + 1)
-				}.onComplete { _ =>
-					loop(limit-1)
+				buffer.send { () =>
+					counter.set(counter.current +1)
+//					counter.transform(_ + 1)
+				}.onComplete { _: Try[Unit] =>
+					loop(limit - 1)
 				}
 			}
 		}
@@ -326,74 +331,74 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 	}
 	def sourceIterator() = Iterable.range(0, conf.len).toIterator
 
-	def runSeqMini()(implicit ec: ExecutionContext): Future[Int] = {
-		val source = sourceIterator()
-		val sink = mini.Capsul(0)
-		val drained = Promise[Int]()
-		def finalize(item: Option[Int]): Future[Unit] = {
-			val logId = Log.scope(s"Pipeline")
-			item match {
-				case Some(item) => sink.sendTransform { current =>
-          val logId = Log.scope(s"Pipeline")
-          val sum = current + item
-          log(s"size = ${sum} after adding $item to $current")
-          sum
-				}
-				case None => {
-					// read the final state
-					log("reading the final state")
-					sink.access { count =>
-						log(s"final count: $count")
-						// println(s"final count: $count")
-						// drained.failure(new RuntimeException("Got: " + count))
-						drained.success(count)
-					}
-				}
-			}
-			Future.unit
-		}
-
-		def connect(
-			sink: Function[Option[Int], Future[Unit]],
-			stages: Int):Function[Option[Int], Future[Unit]] =
-		{
-			if (stages == 1) {
-				sink
-			} else {
-				val buffer = mini.TaskBuffer(conf.bufLen)
-				item => {
-					item match {
-						case None => sink(None) // short circuit final value
-						case Some(i) => buffer.run { () =>
-							Future(add(i))(workEc)
-						}.map { result =>
-							result.onComplete { result =>
-								sink(Some(result.get))
-							}
-						}
-					}
-				}
-			}
-		}
-
-		val fullPipeline = connect(finalize, conf.stages)
-		def pushWork():Future[Unit] = {
-			val logId = Log.scope(s"Pipeline")
-			if (source.hasNext) {
-				val item = source.next
-				log(s"pushWork: begin item $item")
-				fullPipeline(Some(item)).flatMap { case () => pushWork() }
-			} else {
-				log(s"pushWork: ending pipeline")
-				fullPipeline(None)
-			}
-		}
-
-		pushWork().flatMap { case () =>
-			drained.future.onComplete( _ => threadPool.shutdown())
-			drained.future
-		}
-	}
+//	def runSeqMini()(implicit ec: ExecutionContext): Future[Int] = {
+//		val source = sourceIterator()
+//		val sink = mini2.Capsul(0)
+//		val drained = Promise[Int]()
+//		def finalize(item: Option[Int]): Future[Unit] = {
+//			val logId = Log.scope(s"Pipeline")
+//			item match {
+//				case Some(item) => sink.sendTransform { current =>
+//					val logId = Log.scope(s"Pipeline")
+//					val sum = current + item
+//					log(s"size = ${sum} after adding $item to $current")
+//					sum
+//				}
+//				case None => {
+//					// read the final state
+//					log("reading the final state")
+//					sink.access { count =>
+//						log(s"final count: $count")
+//						// println(s"final count: $count")
+//						// drained.failure(new RuntimeException("Got: " + count))
+//						drained.success(count)
+//					}
+//				}
+//			}
+//			Future.unit
+//		}
+//
+//		def connect(
+//			sink: Function[Option[Int], Future[Unit]],
+//			stages: Int):Function[Option[Int], Future[Unit]] =
+//		{
+//			if (stages == 1) {
+//				sink
+//			} else {
+//				val buffer = mini.TaskBuffer(conf.bufLen)
+//				item => {
+//					item match {
+//						case None => sink(None) // short circuit final value
+//						case Some(i) => buffer.run { () =>
+//							Future(add(i))(workEc)
+//						}.map { result =>
+//							result.onComplete { result =>
+//								sink(Some(result.get))
+//							}
+//						}
+//					}
+//				}
+//			}
+//		}
+//
+//		val fullPipeline = connect(finalize, conf.stages)
+//		def pushWork():Future[Unit] = {
+//			val logId = Log.scope(s"Pipeline")
+//			if (source.hasNext) {
+//				val item = source.next
+//				log(s"pushWork: begin item $item")
+//				fullPipeline(Some(item)).flatMap { case () => pushWork() }
+//			} else {
+//				log(s"pushWork: ending pipeline")
+//				fullPipeline(None)
+//			}
+//		}
+//
+//		pushWork().flatMap { case () =>
+//			drained.future.onComplete( _ => threadPool.shutdown())
+//			drained.future
+//		}
+//	}
 
 	def runSeq()(implicit ec: ExecutionContext): Future[Int] = {
 		val source = sourceIterator()
@@ -653,7 +658,7 @@ class PerfTest {
 		def runPipelineComparison(desc: String, conf: PipelineConfig) = {
 			repeat(s"$desc pipeline ($conf)", List(
 //				s"* Capsul" -> (() => new Pipeline(conf).runSeq()),
-				s"* CapsulMini" -> (() => new Pipeline(conf).runSeqMini()),
+//				s"* CapsulMini" -> (() => new Pipeline(conf).runSeqMini()),
 				s"Akka Streams" -> (() => new Pipeline(conf).runAkkaStreams())
 				// s"Monix" -> (() => new Pipeline(conf).runMonix()(monixScheduler))
 			))
@@ -668,12 +673,12 @@ class PerfTest {
 			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
 		))
 		runPipelineComparison("tiny", largePipeline.copy(len=20, stages=2))
-		runPipelineComparison("shallow + short", largePipeline.copy(len=largePipeline.len/10, stages=largePipeline.stages/3))
-		runPipelineComparison("shallow + medium", largePipeline.copy(len=largePipeline.len/2, stages=largePipeline.stages/3))
-		runPipelineComparison("shallow + long", largePipeline.copy(stages=largePipeline.stages/3))
-		runPipelineComparison("medium", largePipeline.copy(stages=largePipeline.stages/2))
-		runPipelineComparison("large", largePipeline)
-		runPipelineComparison("deep", largePipeline.copy(stages=largePipeline.stages*2, parallelism=2))
+//		runPipelineComparison("shallow + short", largePipeline.copy(len=largePipeline.len/10, stages=largePipeline.stages/3))
+//		runPipelineComparison("shallow + medium", largePipeline.copy(len=largePipeline.len/2, stages=largePipeline.stages/3))
+//		runPipelineComparison("shallow + long", largePipeline.copy(stages=largePipeline.stages/3))
+//		runPipelineComparison("medium", largePipeline.copy(stages=largePipeline.stages/2))
+//		runPipelineComparison("large", largePipeline)
+//		runPipelineComparison("deep", largePipeline.copy(stages=largePipeline.stages*2, parallelism=2))
 
 		println("Done - shutting down...")
 		Await.result(actorSystem.terminate(), 2.seconds)

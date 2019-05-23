@@ -12,9 +12,9 @@ trait EnqueueableTask {
 	def run(): Option[Future[_]]
 }
 
-trait AsyncTask extends EnqueueableTask {
-	def runAsync(): Future[_]
-	def isComplete: Boolean
+trait AsyncTask {
+	def spawn(onComplete: Function1[Any,Unit]): Boolean
+	def enqueuedAsync(): Unit
 }
 
 trait UnitOfWork[A] extends EnqueueableTask {
@@ -126,20 +126,6 @@ object UnitOfWork {
 			with HasResultPromise[A]
 			with HasEnqueueAndResultPromise[A]
 			with HasFutureResult[A]
-			with AsyncTask
-	{
-		override final def runAsync(): Future[_] = {
-			try {
-				reportSuccessAsync(fn())
-			} catch {
-				case NonFatal(e) => {
-					reportFailure(e).get
-				}
-			}
-		}
-
-		override def isComplete: Boolean = ???
-	}
 
 	trait IsEnqueueOnly extends IgnoresFailure { self: HasEnqueuePromise[Unit] =>
 		final def enqueuedAsync() {
@@ -167,17 +153,58 @@ object UnitOfWork {
 
 	case class EnqueueOnlyAsync[A](fn: Function0[Future[A]])
 		extends UnitOfWork[Future[A]]
-		with AsyncTask
 		with HasEnqueuePromise[Unit]
-		with IsEnqueueOnly
-	{
-		final def reportSuccess(f: Future[A]): Option[Future[_]] = {
-			Some(f)
+		with IsEnqueueOnly {
+		override protected def reportSuccess(result: Future[A]): Option[Future[_]] = ???
+	}
+
+	case class BackpressureFullAsync[A](fn: Function0[Future[A]])(implicit ec: ExecutionContext)
+		extends AsyncTask
+		with HasEnqueuePromise[Future[A]]
+		with HasResultPromise[A]
+		with HasEnqueueAndResultPromise[A] {
+
+		override def spawn(onComplete: Function1[Any,Unit]): Boolean = {
+			val f = fn()
+			val done = f.isCompleted
+			if (!done) {
+				f.onComplete(onComplete)
+			}
+			f.onComplete(resultPromise.complete)
+			done
 		}
+	}
 
-	// TODO: useless interface
-		override def runAsync(): Future[_] = fn()
+	case class BackpressureFull[A](fn: Function0[A])
+		extends AsyncTask
+			with HasEnqueuePromise[Future[A]]
+			with HasResultPromise[A]
+			with HasEnqueueAndResultPromise[A] {
 
-		override def isComplete: Boolean = ???
+		override def spawn(onComplete: Function1[Any,Unit]): Boolean = {
+			resultPromise.success(fn())
+			true
+		}
+	}
+
+	case class BackpressureEnqueueOnlyAsync[A](fn: Function0[Future[A]])
+		(implicit ec: ExecutionContext)
+		extends AsyncTask with HasEnqueuePromise[Unit] with IsEnqueueOnly {
+
+		override def spawn(onComplete: Function1[Any,Unit]): Boolean = {
+			val f = fn()
+			val done = f.isCompleted
+			if (!done) f.onComplete(onComplete)
+			done
+		}
+	}
+
+	case class BackpressureEnqueueOnly[A](fn: Function0[A])
+		extends AsyncTask with HasEnqueuePromise[Unit] with IsEnqueueOnly {
+
+		override def spawn(onComplete: Function1[Any,Unit]): Boolean = {
+			val f = fn()
+			true
+		}
 	}
 }

@@ -15,8 +15,6 @@ import akka.pattern.ask
 import akka.util.Timeout
 import akka.actor.{Actor, ActorRef, ActorSystem}
 import akka.stream.{ActorMaterializer, Materializer}
-import net.gfxmonk.capsul.mini.TaskBuffer
-import net.gfxmonk.capsul.mini2.BackpressureExecutor
 
 import scala.annotation.tailrec
 

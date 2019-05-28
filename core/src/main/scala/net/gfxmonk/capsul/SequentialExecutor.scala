@@ -2,6 +2,7 @@ package net.gfxmonk.capsul
 
 import java.util.concurrent.ConcurrentLinkedQueue
 
+import net.gfxmonk.capsul
 import net.gfxmonk.capsul.StagedWork.HasEnqueuePromise
 
 import scala.annotation.tailrec
@@ -29,129 +30,96 @@ import scala.concurrent.{ExecutionContext, Future}
  * We can get away with not tying numFutures into state, because it's advisory. If we run ahead / behind a little bit, it doesn't matter because
  * it doesn't affect correctness.
  */
-private [capsul] object Ring {
-	type Count = Int
-	type Idx = Int
-
-	// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
-	val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
-	val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
-	def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
-
-	// if there's no work, we are (or should be) stopped
-	def isStopped(t:State): Boolean = tailIndex(t) == headIndex(t)
-
-	// just for testing / debugging
-	def repr(t:State) = {
-		(headIndex(t), tailIndex(t), numQueued(t))
-	}
-
-
-
-
-	// ------------------------------------------------
-	// // # Simple implementation, for debugging
-	// import monix.execution.atomic._
-	// type State = (Int, Int, Int)
-	// type AtomicState = AtomicAny[State]
-	// def make(head: Idx, tail: Idx, numQueued: Count) = {
-	// 	(head, tail, numQueued)
-	// }
-	// def headIndex(t:State):Idx = t._1
-	// def tailIndex(t:State):Idx = t._2
-	// def numQueued(t:State):Count = t._3
-	// def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
-	// ------------------------------------------------
-	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
-	import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
-	def Atomic(n: Int): AtomicInteger = new AtomicInteger(n)
-	def Atomic(n: Long): AtomicLong = new AtomicLong(n)
-	type AtomicInt = AtomicInteger
-	type State = Long
-	type AtomicState = AtomicLong
-	private val HEAD_OFFSET = 48 // 64 - 16
-	private val TAIL_OFFSET = 32 // 64 - (2*16)
-	private val IDX_MASK = 0xffff // 2 bytes (16 bits)
-	private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
-	def make(head: Idx, tail: Idx, numQueued: Count) = {
-		(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
-	}
-	def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
-	def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
-	def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
-	def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
-	// ------------------------------------------------
-
-}
-
-private [capsul] class Ring[T >: Null <: AnyRef](size: Int) {
-	import Ring._
-	if (size > MAX_SIZE) {
-		throw new RuntimeException(s"size ($size) is larger then the maximum ($MAX_SIZE)")
-	}
-
-	private val bounds = size * 2
-	private val negativeOne = bounds - 1
-	private var arr = Array.fill(size)(new RingItem[T])
-
-	def mask(idx: Idx): Idx = (idx % size)
-
-	def at(idx: Idx): RingItem[T] = arr(mask(idx)) // unsafe woo
-
-	def add(i: Idx, n: Int) = {
-		// assumes `n` is never greater than `bounds`
-		val result = i + n
-		if (result >= bounds) {
-			result - bounds
-		} else {
-			result
-		}
-	}
-
-	def inc(a: Idx) = {
-		// assuming this is more efficient than add(a,1)
-		if (a == negativeOne) 0 else a + 1
-	}
-
-	// actually adding a negative is problematic due to `%` behaviour for negatives
-	def dec(a: Idx) = add(a, negativeOne)
-
-	def numItems(head: Idx, tail: Idx):Int = {
-		// queue is full when tail has wrapped around to one less than head
-		val diff = tail - head
-		if (diff < 0) {
-			diff + bounds // there's never negative space available, wrap around
-		} else {
-			diff
-		}
-	}
-
-	def spaceAvailable(s: State, numFutures: Int):Int = {
-		val space = size - numItems(Ring.headIndex(s), Ring.tailIndex(s)) - numFutures
-		// Note: numFuturesRef is not synchronized with the rest of state; it may be inaccurate
-		// (causing a negative space value)
-		if (space < 0) {
-			0
-		} else {
-			space
-		}
-	}
-
-	def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int): State = {
-		// dequeue up to numDequeue & reserve up to (numDequeue + numWork) ring slots
-		val head = headIndex(t)
-		val tail = tailIndex(t)
-		make(head, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
-	}
-}
 
 object SequentialExecutor {
 	val defaultBufferSize = 10
 	def apply(bufLen: Int = defaultBufferSize)(implicit ec: ExecutionContext) = new SequentialExecutor(bufLen)
-	private val successfulUnit = Future.successful(())
+
+	private [capsul] object Ring {
+		import capsul.BaseRing._
+
+		// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
+		val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
+		val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
+		def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
+
+		// if there's no work, we are (or should be) stopped
+		def isStopped(t:State): Boolean = tailIndex(t) == headIndex(t)
+
+		// just for testing / debugging
+		def repr(t:State) = {
+			(headIndex(t), tailIndex(t), numQueued(t))
+		}
+
+
+		// ------------------------------------------------
+		// // # Simple implementation, for debugging
+		// import monix.execution.atomic._
+		// type State = (Int, Int, Int)
+		// type AtomicState = AtomicAny[State]
+		// def make(head: Idx, tail: Idx, numQueued: Count) = {
+		// 	(head, tail, numQueued)
+		// }
+		// def headIndex(t:State):Idx = t._1
+		// def tailIndex(t:State):Idx = t._2
+		// def numQueued(t:State):Count = t._3
+		// def incrementQueued(t:State): State = make(headIndex(t), tailIndex(t), numQueued(t) + 1)
+		// ------------------------------------------------
+		// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
+		import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
+		def Atomic(n: Int): AtomicInteger = new AtomicInteger(n)
+		def Atomic(n: Long): AtomicLong = new AtomicLong(n)
+		type AtomicInt = AtomicInteger
+		type State = Long
+		type AtomicState = AtomicLong
+		private val HEAD_OFFSET = 48 // 64 - 16
+		private val TAIL_OFFSET = 32 // 64 - (2*16)
+		private val IDX_MASK = 0xffff // 2 bytes (16 bits)
+		private val QUEUED_MASK = 0xffffffff // 4 bytes (32 bits)
+		def make(head: Idx, tail: Idx, numQueued: Count) = {
+			(head.toLong << HEAD_OFFSET) | (tail.toLong << TAIL_OFFSET) | (numQueued.toLong)
+		}
+		def headIndex(t:State):Idx = (t >>> HEAD_OFFSET).toInt
+		def tailIndex(t:State):Idx = ((t >>> TAIL_OFFSET) & IDX_MASK).toInt
+		def numQueued(t:State):Count = (t & QUEUED_MASK).toInt
+		def incrementQueued(t:State): State = t + 1 // since queued is the last 8 bytes, we can just increment the whole int
+		// ------------------------------------------------
+
+	}
+
+	private [capsul] class Ring[T >: Null <: AnyRef](size: Int) extends capsul.BaseRing[T](size) {
+		import capsul.BaseRing._
+		import Ring._
+		if (size > MAX_SIZE) {
+			throw new RuntimeException(s"size ($size) is larger then the maximum ($MAX_SIZE)")
+		}
+
+		def spaceAvailable(s: State, numFutures: Int):Int = {
+			val space = size - numItems(Ring.headIndex(s), Ring.tailIndex(s)) - numFutures
+			// Note: numFuturesRef is not synchronized with the rest of state; it may be inaccurate
+			// (causing a negative space value)
+			if (space < 0) {
+				0
+			} else {
+				space
+			}
+		}
+
+		def dequeueAndReserve(t:State, numDequeue: Int, numWork: Int): State = {
+			// dequeue up to numDequeue & reserve up to (numDequeue + numWork) ring slots
+			val head = headIndex(t)
+			val tail = tailIndex(t)
+			make(head, add(tail, numDequeue + numWork), numQueued(t) - numDequeue)
+		}
+	}
 }
 
-class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
+class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends CapsulExecutor {
+	import SequentialExecutor._
+	import SequentialExecutor.Ring._
+	import Log.log
+	import capsul.BaseRing._
+
 	private [capsul] val ring = new Ring[StagedWork](bufLen)
 	private [capsul] val queue = new ConcurrentLinkedQueue[StagedWork]()
 	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
@@ -160,12 +128,9 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	// don't advance until you've freed up this many slots
 	private val advanceMinThreshold = Math.max(3, bufLen / 4)
 
-	import Log.log
-	import Ring._
-
 	def enqueueOnly[R](task: StagedWork with HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (doEnqueue(task)) {
-			SequentialExecutor.successfulUnit
+			Future.unit
 		} else {
 			task.enqueuedPromise.future
 		}

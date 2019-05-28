@@ -55,7 +55,7 @@ class RingStressTest {
 		def check(attempts: Int): String = {
 			var state = executor.stateRef.get
 			var numFutures = executor.numFuturesRef.get
-			val (head, tail, queued) = Ring.repr(state)
+			val (head, tail, queued) = BaseRing.repr(state)
 			val desc = s"(head=$head, tail=$tail, queued=$queued, futures=${numFutures})"
 
 			// println(s"attempt[$attempts], ${desc}")
@@ -65,9 +65,9 @@ class RingStressTest {
 			//  - it's not running
 			//  - head == tail (this should be covered by a stopped state, since we access state before head)
 			if (
-				Ring.isStopped(state) &&
+				BaseRing.isStopped(state) &&
 				numFutures == incompletePromises.length &&
-				Ring.tailIndex(state) == Ring.headIndex(state))
+				BaseRing.tailIndex(state) == BaseRing.headIndex(state))
 			{
 				// println(s"got it! isStopped = ${Ring.isStopped(state)} && ${numFutures} == ${incompletePromises.length} && ${Ring.tailIndex(state)} == $head  ;;;;  $desc")
 				desc

@@ -8,19 +8,19 @@ import scala.collection.immutable.Queue
 import scala.collection.mutable
 
 class RingSpec extends FunSpec {
-	import Ring._
+	import BaseRing._
 
 	val size = 10
 	val minIndex = 0
 	val maxIndex = 19
 	val validIndices = (minIndex to maxIndex).toList
 	val validSizes = (minIndex to size).toList
-	def emptyState(idx: Int = 0) = Ring.make(idx, idx, 0)
-	def fullState(idx: Int = 0) = Ring.make(idx, idx, 0)
-	def withItems(idx: Int, n: Int) = Ring.make(idx, ring.add(idx, n), 0)
+	def emptyState(idx: Int = 0) = BaseRing.make(idx, idx, 0)
+	def fullState(idx: Int = 0) = BaseRing.make(idx, idx, 0)
+	def withItems(idx: Int, n: Int) = BaseRing.make(idx, ring.add(idx, n), 0)
 
 	// we're only testing pure functions on ring, so we can reuse an instance
-	val ring = new Ring(size)
+	val ring = new BaseRing(size)
 
 	def actsLike[Item,Ret](range:Seq[Item], a: Function[Item,Ret], b: Function[Item,Ret]): Unit = {
 		val inputs = range.toList
@@ -43,7 +43,7 @@ class RingSpec extends FunSpec {
 				(1,2,3)
 			)
 			examples.map { case (a,b,c) =>
-				assert(Ring.repr(Ring.make(a,b,c)) == (a,b,c))
+				assert(BaseRing.repr(BaseRing.make(a,b,c)) == (a,b,c))
 			}
 		}
 	}
@@ -84,7 +84,7 @@ class RingSpec extends FunSpec {
 		foreachIndexIt("returns the number of items in the ring") { i =>
 			validSizes.foreach { n =>
 				val state = withItems(i, n)
-				val result = ring.numItems(Ring.headIndex(state), Ring.tailIndex(state))
+				val result = ring.numItems(BaseRing.headIndex(state), BaseRing.tailIndex(state))
 				assert(result == n, s"- ring $state with size $n")
 			}
 		}
@@ -106,36 +106,36 @@ class RingSpec extends FunSpec {
 	}
 
 	describe("dequeueAndReserve") {
-		val state = Ring.make(0, 2, 5)
+		val state = BaseRing.make(0, 2, 5)
 		val newState = ring.dequeueAndReserve(state, 3, 1)
 
 		it("leaves head unchanged") {
-			assert(Ring.headIndex(state) == 0)
-			assert(Ring.headIndex(newState) == 0)
+			assert(BaseRing.headIndex(state) == 0)
+			assert(BaseRing.headIndex(newState) == 0)
 		}
 		it("extends tail by queued+work") {
-			assert(Ring.tailIndex(state) == 2)
-			assert(Ring.tailIndex(newState) == 6)
+			assert(BaseRing.tailIndex(state) == 2)
+			assert(BaseRing.tailIndex(newState) == 6)
 		}
 		it("decrements queue by numQueue") {
-			assert(Ring.numQueued(state) == 5)
-			assert(Ring.numQueued(newState) == 2)
+			assert(BaseRing.numQueued(state) == 5)
+			assert(BaseRing.numQueued(newState) == 2)
 		}
 	}
 
 	describe("incrementQueued") {
 		it("increments queued value") {
-			val state = Ring.make(1, 2, 3)
-			assert(Ring.incrementQueued(state) == Ring.make(1,2,4))
+			val state = BaseRing.make(1, 2, 3)
+			assert(BaseRing.incrementQueued(state) == BaseRing.make(1,2,4))
 		}
 	}
 
 	describe("isStopped") {
 		foreachIndexIt("is true iff the ring is empty") { i =>
-			assert(Ring.isStopped(emptyState(i)) == true)
+			assert(BaseRing.isStopped(emptyState(i)) == true)
 			validSizes.foreach { n =>
 				val expected = n == 0
-				assert(Ring.isStopped(withItems(i, n)) == expected)
+				assert(BaseRing.isStopped(withItems(i, n)) == expected)
 			}
 		}
 	}

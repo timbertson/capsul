@@ -1,6 +1,8 @@
 package net.gfxmonk.capsul
 
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import net.gfxmonk.capsul.StagedWork.HasEnqueuePromise
+
+import scala.concurrent.{ExecutionContext, Future}
 
 /** A wrapper for getting / setting state */
 class Ref[T](init:T) {
@@ -71,7 +73,7 @@ completes)
                   is accepted.
 
 */
-class Capsul[T](init: T, thread: SequentialExecutor) {
+class Capsul[T](init: T, thread: CapsulExecutor) {
 	private val state = new Ref(init)
 
 	/** Send a pure transformation */
@@ -117,4 +119,28 @@ class Capsul[T](init: T, thread: SequentialExecutor) {
 	/** Perform an access which returns a [[Future]][R] */
 	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): Future[Future[R]] =
 		thread.enqueue(new StagedWork.FullAsync[R](() => fn(state.current)))
+}
+
+// like `Capsul`, but without
+class StatelessCapsul(val thread: CapsulExecutor) extends AnyVal {
+	def send[T](fn: Function0[T]): Future[Unit] =
+		thread.enqueueOnly(StagedWork.EnqueueOnly(fn))
+
+	def sendAsync[T](fn: Function0[Future[T]])(implicit ec: ExecutionContext): Future[Unit] =
+		thread.enqueueOnly(StagedWork.EnqueueOnlyAsync(fn))
+
+	def run[T](fn: Function0[T]): StagedFuture[T] =
+		thread.enqueue(StagedWork.Full(fn))
+
+	def runAsync[T](fn: Function0[Future[T]])(implicit ec: ExecutionContext): StagedFuture[T] =
+		thread.enqueue(StagedWork.FullAsync(fn))
+}
+
+trait CapsulExecutor {
+	def enqueueOnly[R](task: StagedWork with HasEnqueuePromise[Unit]): Future[Unit]
+
+	def enqueue[R](task: StagedWork
+			with StagedWork.HasEnqueuePromise[Future[R]]
+			with HasResultPromise[R]
+	): Future[Future[R]]
 }

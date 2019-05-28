@@ -2,25 +2,12 @@ package net.gfxmonk.capsul.mini2
 
 import java.util.concurrent.ConcurrentLinkedQueue
 
-import net.gfxmonk.capsul.UnitOfWork.{HasEnqueueAndResultPromise, HasEnqueuePromise}
+import net.gfxmonk.capsul.StagedWork.HasEnqueuePromise
+import net.gfxmonk.capsul.internal.Log
+import net.gfxmonk.capsul._
 
 import scala.annotation.tailrec
-import net.gfxmonk.capsul.internal.Log
-import net.gfxmonk.capsul.{AsyncTask, EnqueueableTask, StagedFuture, UnitOfWork}
-
 import scala.concurrent.{ExecutionContext, Future}
-
-
-class RingItem[T>:Null<:AnyRef] {
-	@volatile private var contents:T = null
-	def set(item:T) {
-		contents = item
-	}
-
-	def get: T = {
-		contents
-	}
-}
 
 /* Topography / terminology
  *
@@ -71,7 +58,7 @@ private [capsul] object Ring {
 	// def numQueued(t:State):Count = t._3
 	// ------------------------------------------------
 	// # Packed implementation, for performance. Head(2)|Tail(2)|NumQueued(4)
-	import java.util.concurrent.atomic.{AtomicLong, AtomicInteger}
+	import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 	def Atomic(n: Int): AtomicInteger = new AtomicInteger(n)
 	def Atomic(n: Long): AtomicLong = new AtomicLong(n)
 	type AtomicInt = AtomicInteger
@@ -170,13 +157,9 @@ object BackpressureExecutor {
 	private val successfulUnit = Future.successful(())
 }
 
-sealed trait CompletionMode
-case object Ordered extends CompletionMode
-case object Unordered extends CompletionMode
-
 class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private [capsul] val ring = new Ring[AsyncTask](bufLen)
-	private [capsul] val queue = new ConcurrentLinkedQueue[AsyncTask]()
+	private [capsul] val ring = new Ring[StagedWork](bufLen)
+	private [capsul] val queue = new ConcurrentLinkedQueue[StagedWork]()
 	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0, false))
 
 	import Log.log
@@ -184,22 +167,22 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 	// TODO decide on API
 	def sendAsync[R](fn: Function0[Future[R]]): Future[Unit] = {
-		enqueueOnly(UnitOfWork.BackpressureEnqueueOnlyAsync(fn))
+		enqueueOnly(StagedWork.EnqueueOnlyAsync(fn))
 	}
 	def send[R](fn: Function0[_]): Future[Unit] = {
-		enqueueOnly(UnitOfWork.BackpressureEnqueueOnly(fn))
+		enqueueOnly(StagedWork.EnqueueOnly(fn))
 	}
 	def run[R](fn: Function0[R]): Future[Future[R]] = {
-		enqueue(UnitOfWork.BackpressureFull(fn))
+		enqueue(StagedWork.Full(fn))
 	}
 	def runAsync[R](fn: Function0[Future[R]]): Future[Future[R]] = {
-		enqueue(UnitOfWork.BackpressureFullAsync(fn))
+		enqueue(StagedWork.FullAsync(fn))
 	}
-	def flatRunAsync[R](fn: Function0[Future[Future[R]]]): Future[Future[R]] = {
-		enqueue(UnitOfWork.BackpressureFullAsync(fn)).flatten
+	def flatRunAsync[R](fn: Function0[Future[R]]): Future[R] = {
+		enqueue(StagedWork.FullAsync(fn)).flatten
 	}
 
-	def enqueueOnly[R](task: AsyncTask with HasEnqueuePromise[Unit]): Future[Unit] = {
+	def enqueueOnly[R](task: StagedWork with HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (doEnqueue(task)) {
 			Future.unit
 		} else {
@@ -207,10 +190,10 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 		}
 	}
 
-	def enqueue[R](
-		task: AsyncTask
-			with UnitOfWork.HasEnqueuePromise[Future[R]]
-			with UnitOfWork.HasResultPromise[R]
+	private def enqueue[R](
+		task: StagedWork
+			with StagedWork.HasEnqueuePromise[Future[R]]
+			with HasResultPromise[R]
 	): Future[Future[R]] = {
 		if (doEnqueue(task)) {
 			Future.successful(task.resultPromise.future)
@@ -226,7 +209,7 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	@tailrec
-	private def doEnqueue(work: AsyncTask):Boolean = {
+	private def doEnqueue(work: StagedWork):Boolean = {
 		val logId = Log.scope(this, "doEnqueue")
 		val state = stateRef.get
 
@@ -306,46 +289,35 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 
 		private def loop(maxItems: Int, headIndex: Int): Unit = {
 			var state = stateRef.get
-			val numRun = runBatch(maxItems, headIndex, state)
-			maybeShutdown(maxItems - numRun, Ring.tailIndex(state))
-		}
-
-		private def runBatch(_maxItems: Int, headIndex: Int, state: Ring.State): Int = {
 			val logId = Log.scope(self, "WorkLoop.runBatch")
 			val currentTail = Ring.tailIndex(state)
+			var currentHead = headIndex
 			val readyItems = ring.numItems(headIndex, currentTail)
 			var completedSync = 0
 
-			// There must be something pending. Only this loop updates nextTaskIndex, and
-			// it terminates if the ring becomes empty
+			// There must be something pending. Only this thread updates nextTaskIndex
+			// (in maybeShutdown), and it terminates if the ring becomes empty
 
-			var currentHead = headIndex
 			log(s"workLoop: ${Ring.repr(state)}, head = $currentHead, tail = $currentTail")
 			while (currentHead != currentTail) {
 				log(s"loading item @ slot idx $currentHead")
 				val slot = ring.at(currentHead)
 				var item = slot.get
 
-				var lastLog = System.currentTimeMillis()
-				while(item == null) {
+				while (item == null) {
 					// spin waiting for item to be set
 					item = slot.get
-					val now = System.currentTimeMillis()
-					if (lastLog + 1000 < now) {
-						lastLog = now
-						log(s"still waiting for slot $currentHead")
-					}
 				}
 				log(s"running item @ slot idx $currentHead")
-
-				// TODO can't null this early if completionMode is Ordered
 				log(s"nulling item")
 				slot.set(null)
 
-				log(s"evaluating item on thread ${Thread.currentThread.getId}")
-				if (item.spawn(completionFn)) {
-					// already done, can complete syn
-					completedSync += 1
+				item.spawn() match {
+					case Completed => {
+						// already done, can complete sync
+						completedSync += 1
+					}
+					case Async(f) => f.onComplete(completionFn)
 				}
 
 				currentHead = ring.inc(currentHead)
@@ -353,12 +325,13 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 			if (completedSync > 0) {
 				completeUnordered(completedSync)
 			}
-			readyItems
+			maybeShutdown(maxItems - readyItems, Ring.tailIndex(state))
 		}
 
 		@tailrec
 		private def maybeShutdown(maxItems: Int, currentTail: Int): Unit = {
-			// TODO: check for a changed head too, because that implies new space
+			// Note: headIndex can change from other threads, but it never
+			// exceeds nextTaskIndex so we don't need to consider it here
 			val logId = Log.scope(self, "WorkLoop.maybeShutdown")
 			if (maxItems <= 0) {
 				log("trampolining to prevent starvation")
@@ -382,14 +355,6 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				}
 			}
 		}
-
-//		private def completeFromHead(): Unit = {
-//			val state = stateRef.get
-//			val (didCompleteAny, finalState) = _completeFromHead(state, false)
-//			if (didCompleteAny) {
-//				tryDequeue(finalState)
-//			}
-//		}
 
 		@tailrec
 		private def completeUnordered(n: Int): Unit = {
@@ -439,33 +404,5 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 				// as above
 			}
 		}
-
-//		@tailrec
-//		private def _completeFromHead(state: Ring.State, didCompleteAny: Boolean): (Boolean, Ring.State) = {
-//			// "The fish completes from the head down..."
-//			// NOTE: may be called from any thread
-//			val headIndex = Ring.headIndex(state)
-//			val tailIndex = Ring.tailIndex(state)
-//			if (headIndex == tailIndex) {
-//				// empty ring
-//				(didCompleteAny, state)
-//			} else {
-//				val item = ring.at(headIndex).get
-//				val nextHead = ring.inc(headIndex)
-//				if (item != null && item.isComplete) {
-//					val nextState = Ring.make(nextHead, tailIndex, Ring.numQueued(state), Ring.isRunning(state))
-//					if (stateRef.compareAndSet(state, nextState)) {
-//						// done! try another
-//						_completeFromHead(nextState, true)
-//					} else {
-//						// CAS fail, try again
-//						_completeFromHead(stateRef.get, didCompleteAny)
-//					}
-//				} else {
-//					// incomplete item, stop there
-//					(didCompleteAny, state)
-//				}
-//			}
-//		}
 	}
 }

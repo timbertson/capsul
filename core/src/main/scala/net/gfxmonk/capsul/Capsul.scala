@@ -76,57 +76,45 @@ class Capsul[T](init: T, thread: SequentialExecutor) {
 
 	/** Send a pure transformation */
 	def sendTransform(fn: T => T): Future[Unit] =
-		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(fn(state.current))))
+		thread.enqueueOnly(StagedWork.EnqueueOnly(() => state.set(fn(state.current))))
 
 	/** Send a set operation */
 	def sendSet(updated: T): Future[Unit] =
-		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => state.set(updated)))
+		thread.enqueueOnly(StagedWork.EnqueueOnly(() => state.set(updated)))
 
 	/** Send an access operation */
-	def sendAccess(fn: T => _): Future[Unit] =
-		thread.enqueueOnly(UnitOfWork.EnqueueOnly(() => fn(state.current)))
-
-	/** Send an access operation which returns a [[StagedFuture]][R] */
-	def sendAccessStaged[A](fn: T => StagedFuture[A])(implicit ec: ExecutionContext): Future[Unit] =
-		thread.enqueueOnly(UnitOfWork.EnqueueOnlyStaged(() => fn(state.current)))
+	def sendAccess[R](fn: T => R): Future[Unit] =
+		thread.enqueueOnly(StagedWork.EnqueueOnly(() => fn(state.current)))
 
 	/** Send an access operation which returns a [[Future]][R] */
 	def sendAccessAsync[A](fn: T => Future[A]): Future[Unit] =
-		thread.enqueueOnly(UnitOfWork.EnqueueOnlyAsync(() => fn(state.current)))
+		thread.enqueueOnly(StagedWork.EnqueueOnly(() => fn(state.current)))
 
 	/** Return the current state value */
 	def current: Future[T] =
-		thread.enqueue(UnitOfWork.Full(() => state.current))
+		thread.enqueue(StagedWork.Full(() => state.current)).flatten
 
 	/** Perform a full mutation */
-	def mutate[R](fn: Ref[T] => R): StagedFuture[R] =
-		thread.enqueue(UnitOfWork.Full(() => fn(state)))
+	def mutate[R](fn: Ref[T] => R): Future[Future[R]] =
+		thread.enqueue(StagedWork.Full(() => fn(state)))
 
 	/** Perform a pure transformation */
-	def transform(fn: T => T): StagedFuture[T] =
-		thread.enqueue(UnitOfWork.Full { () =>
+	def transform(fn: T => T): Future[Future[T]] =
+		thread.enqueue(StagedWork.Full { () =>
 			val updated = fn(state.current)
 			state.set(updated)
 			updated
 		})
 
 	/** Perform a function with the current state */
-	def access[R](fn: T => R): StagedFuture[R] =
-		thread.enqueue(UnitOfWork.Full(() => fn(state.current)))
-
-	/** Perform a mutation which returns a [[StagedFuture]][R] */
-	def mutateStaged[R](fn: Ref[T] => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state)))
+	def access[R](fn: T => R): Future[Future[R]] =
+		thread.enqueue(StagedWork.Full(() => fn(state.current)))
 
 	/** Perform a mutation which returns a [[Future]][R] */
-	def mutateAsync[R](fn: Ref[T] => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state)))
-
-	/** Perform an access which returns a [[StagedFuture]][R] */
-	def accessStaged[R](fn: T => StagedFuture[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueue(new UnitOfWork.FullStaged[R](() => fn(state.current)))
+	def mutateAsync[R](fn: Ref[T] => Future[R])(implicit ec: ExecutionContext): Future[Future[R]] =
+		thread.enqueue(new StagedWork.FullAsync[R](() => fn(state)))
 
 	/** Perform an access which returns a [[Future]][R] */
-	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): StagedFuture[R] =
-		thread.enqueue(new UnitOfWork.FullAsync[R](() => fn(state.current)))
+	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): Future[Future[R]] =
+		thread.enqueue(new StagedWork.FullAsync[R](() => fn(state.current)))
 }

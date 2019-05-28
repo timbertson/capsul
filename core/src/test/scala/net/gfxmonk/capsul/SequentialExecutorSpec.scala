@@ -51,27 +51,27 @@ object SequentialExecutorSpec {
 			count.current
 		}
 
-		def inc(sleep: Int = 10): UnitOfWork.Full[Int] = {
-			UnitOfWork.Full(() => doInc(sleep))
+		def inc(sleep: Int = 10): StagedWork.Full[Int] = {
+			StagedWork.Full(() => doInc(sleep))
 		}
 
-		def incAsync(sleep: Int = 10): UnitOfWork.FullAsync[Int] = {
+		def incAsync(sleep: Int = 10): StagedWork.FullAsync[Int] = {
 			val promise = Promise[Unit]()
 			promises.enqueue(promise)
-			UnitOfWork.FullAsync(() => {
+			StagedWork.FullAsync(() => {
 				val current = doInc(sleep)
 				promise.future.map(_ => current)
 			})
 		}
 
-		def noop(): UnitOfWork.Full[Unit] = {
-			UnitOfWork.Full(() => ())
+		def noop(): StagedWork.Full[Unit] = {
+			StagedWork.Full(() => ())
 		}
 
-		def noopAsync(sleep: Int = 10): UnitOfWork.FullAsync[Unit] = {
+		def noopAsync(sleep: Int = 10): StagedWork.FullAsync[Unit] = {
 			val promise = Promise[Unit]()
 			promises.enqueue(promise)
-			UnitOfWork.FullAsync(() => {
+			StagedWork.FullAsync(() => {
 				promise.future
 			})
 		}
@@ -274,7 +274,7 @@ class SequentialExecutorSpec extends FunSpec with BeforeAndAfterAll with TimeLim
 			val ctx = Ctx.withManualExecution(2); import ctx._
 			val futures = List(
 				ex.enqueue(noopAsync()),
-				ex.enqueue(UnitOfWork.Full(() => promises.head.success(())))
+				ex.enqueue(StagedWork.Full(() => promises.head.success(())))
 			) ++ List.fill(3)(ex.enqueue(incAsync()))
 			assert(group(futures.map(_.isAccepted)) == List(true -> 2, false -> 3))
 			ec.runUntilEmpty()

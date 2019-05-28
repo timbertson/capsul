@@ -2,7 +2,7 @@ package net.gfxmonk.capsul.mini2
 
 import monix.execution.Scheduler
 import monix.execution.atomic.AtomicInt
-import net.gfxmonk.capsul.{StagedFuture, UnitOfWork}
+import net.gfxmonk.capsul.{StagedFuture, StagedWork}
 import org.scalatest.concurrent.TimeLimitedTests
 import org.scalatest.prop.PropertyChecks
 import org.scalatest.{FunSpec, Matchers}
@@ -142,27 +142,27 @@ object SequentialExecutorSpec {
 			count.current
 		}
 
-		def inc(sleep: Int = 10): UnitOfWork.Full[Int] = {
-			UnitOfWork.Full(() => doInc(sleep))
+		def inc(sleep: Int = 10): StagedWork.Full[Int] = {
+			StagedWork.Full(() => doInc(sleep))
 		}
 
-		def incAsync(sleep: Int = 10): UnitOfWork.FullAsync[Int] = {
+		def incAsync(sleep: Int = 10): StagedWork.FullAsync[Int] = {
 			val promise = Promise[Unit]()
 			promises.enqueue(promise)
-			UnitOfWork.FullAsync(() => {
+			StagedWork.FullAsync(() => {
 				val current = doInc(sleep)
 				promise.future.map(_ => current)
 			})
 		}
 
-		def noop(): UnitOfWork.Full[Unit] = {
-			UnitOfWork.Full(() => ())
+		def noop(): StagedWork.Full[Unit] = {
+			StagedWork.Full(() => ())
 		}
 
-		def noopAsync(sleep: Int = 10): UnitOfWork.FullAsync[Unit] = {
+		def noopAsync(sleep: Int = 10): StagedWork.FullAsync[Unit] = {
 			val promise = Promise[Unit]()
 			promises.enqueue(promise)
-			UnitOfWork.FullAsync(() => {
+			StagedWork.FullAsync(() => {
 				promise.future
 			})
 		}

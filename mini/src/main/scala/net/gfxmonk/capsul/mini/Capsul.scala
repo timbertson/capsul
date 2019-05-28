@@ -4,6 +4,8 @@ import java.util
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.{ConcurrentLinkedQueue, LinkedBlockingQueue}
 
+import net.gfxmonk.capsul.{AtomicWork, HasResultPromise}
+
 import scala.annotation.tailrec
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -57,27 +59,27 @@ class Capsul[T](init: T, thread: SequentialExecutor) {
 
 	/** Send a pure transformation */
 	def sendTransform(fn: T => T): Unit =
-		thread.enqueueOnly(new WorkIgnore(() => state.set(fn(state.current))))
+		thread.enqueueOnly(new AtomicWork.EnqueueOnly(() => state.set(fn(state.current))))
 
 	/** Send a set operation */
 	def sendSet(updated: T): Unit =
-		thread.enqueueOnly(new WorkIgnore(() => state.set(updated)))
+		thread.enqueueOnly(new AtomicWork.EnqueueOnly(() => state.set(updated)))
 
 	/** Send an access operation */
 	def sendAccess(fn: T => _): Unit =
-		thread.enqueueOnly(new WorkIgnore(() => fn(state.current)))
+		thread.enqueueOnly(new AtomicWork.EnqueueOnly(() => fn(state.current)))
 
 	/** Return the current state value */
 	def current: Future[T] =
-		thread.enqueue(new WorkReturn(() => state.current))
+		thread.enqueue(new AtomicWork.Full(() => state.current))
 
 	/** Perform a full mutation */
 	def mutate[R](fn: Ref[T] => R): Future[R] =
-		thread.enqueue(new WorkReturn(() => fn(state)))
+		thread.enqueue(new AtomicWork.Full(() => fn(state)))
 
 	/** Perform a pure transformation */
 	def transform(fn: T => T): Future[T] =
-		thread.enqueue(new WorkReturn(() => {
+		thread.enqueue(new AtomicWork.Full(() => {
 			val updated = fn(state.current)
 			state.set(updated)
 			updated
@@ -85,30 +87,30 @@ class Capsul[T](init: T, thread: SequentialExecutor) {
 
 	/** Perform a function with the current state */
 	def access[R](fn: T => R): Future[R] =
-		thread.enqueue(new WorkReturn(() => fn(state.current)))
+		thread.enqueue(new AtomicWork.Full(() => fn(state.current)))
 }
 
 object SequentialExecutor {
 	private [capsul] def unbounded()(implicit ec: ExecutionContext) =
-		new SequentialExecutor(new ConcurrentLinkedQueue[Work]())
+		new SequentialExecutor(new ConcurrentLinkedQueue[AtomicWork]())
 
 	private [capsul] def bounded(bufLen: Int)(implicit ec: ExecutionContext) =
-		new SequentialExecutor(new LinkedBlockingQueue[Work](bufLen))
+		new SequentialExecutor(new LinkedBlockingQueue[AtomicWork](bufLen))
 }
 
-class SequentialExecutor(queue: util.Queue[Work])(implicit ec: ExecutionContext) {
+class SequentialExecutor(queue: util.Queue[AtomicWork])(implicit ec: ExecutionContext) {
 	private [capsul] val stateRef = new AtomicLong(0)
 
-	def enqueueOnly[R](task: WorkIgnore[_]): Unit = {
+	def enqueueOnly[R](task: AtomicWork): Unit = {
 		doEnqueue(task)
 	}
 
-	def enqueue[R](task: WorkReturn[R]): Future[R] = {
+	def enqueue[R](task: AtomicWork with HasResultPromise[R]): Future[R] = {
 		doEnqueue(task)
 		task.resultPromise.future
 	}
 
-	private def doEnqueue(work: Work) {
+	private def doEnqueue(work: AtomicWork) {
 		queue.add(work)
 		val state = stateRef.getAndIncrement()
 		// if state was 0, run loop

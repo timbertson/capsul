@@ -92,7 +92,7 @@ lazy val mini = (project in file("mini")).settings(
   name := "capsul-mini",
 	libraryDependencies += "org.scalacheck" %% "scalacheck" % "1.14.0" % "test"
 	/* publicProjectSettings */
-).dependsOn(core % "test")
+).dependsOn(core)
 
 lazy val perf = (project in file("perf")).settings(
   hiddenProject,

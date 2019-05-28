@@ -6,7 +6,7 @@ import monix.eval.TaskSemaphore
 import monix.execution.Scheduler.Implicits.global
 import net.gfxmonk.capsul.examples.FutureUtils
 import net.gfxmonk.capsul._
-import net.gfxmonk.capsul.staged._
+import net.gfxmonk.capsul.StagedFuture.Implicits._
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -28,17 +28,17 @@ object StateBased {
 			// The result is that if the final actor in the chain is at capacity,
 			// intermediate buffers will fill but not overflow, since they
 			// don't pop an item until it's accepted downstream
-			state.accessStaged(prefix => {
+			state.accessAsync[Future[String]](prefix => {
 				val prefixed = prefix + value
 				next match {
 					case Some(prefixer) => prefixer.prefix(prefixed)
 					case None => StagedFuture.successful(prefixed)
 				}
-			})
+			}).flatten
 		}
 
 		def prefixAsync(value: String): StagedFuture[String] = {
-			state.accessStaged(prefix => {
+			state.accessAsync[Future[String]](prefix => {
 				val prefixed = Future {
 					//inexplicably async, for demonstration purposes
 					Thread.sleep(1000)
@@ -46,10 +46,10 @@ object StateBased {
 				}
 
 				next match {
-					case Some(prefixer) => prefixed.flatMapStaged(prefixed => prefixer.prefixAsync(prefixed))
+					case Some(prefixer) => prefixed.flatMap(prefixed => prefixer.prefixAsync(prefixed))
 					case None => StagedFuture.accepted(prefixed)
 				}
-			})
+			}).flatten
 		}
 	}
 
@@ -62,7 +62,7 @@ object StateBased {
 			() <- a.initPrefix("a ")
 			() <- b.initPrefix("then b ")
 			() <- c.initPrefix("then c:")
-			result <- c.prefix(value)
+			result <- c.prefix(value).flatten
 		} yield result
 	}
 
@@ -75,7 +75,7 @@ object StateBased {
 			() <- a.initPrefix("a ")
 			() <- b.initPrefix("then b ")
 			() <- c.initPrefix("then c:")
-			result <- c.prefixAsync(value)
+			result <- c.prefixAsync(value).flatten
 		} yield result
 	}
 }

@@ -32,7 +32,7 @@ object Main {
 			formatted <- state.mutate { ref =>
 				ref.set(ref.current + 3)
 				s"The counter ended up being: ${ref.current}"
-			}
+			}.flatten
 		} yield formatted
 	}
 

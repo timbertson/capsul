@@ -1,22 +1,13 @@
 package net.gfxmonk.capsul
 
 import java.util.concurrent.ConcurrentLinkedQueue
+
+import net.gfxmonk.capsul.StagedWork.HasEnqueuePromise
+
 import scala.annotation.tailrec
 import net.gfxmonk.capsul.internal.Log
 
 import scala.concurrent.{ExecutionContext, Future}
-
-
-class RingItem[T>:Null<:AnyRef] {
-	@volatile private var contents:T = null
-	def set(item:T) {
-		contents = item
-	}
-
-	def get: T = {
-		contents
-	}
-}
 
 /* Topography / terminology
  *
@@ -161,8 +152,8 @@ object SequentialExecutor {
 }
 
 class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
-	private [capsul] val ring = new Ring[EnqueueableTask](bufLen)
-	private [capsul] val queue = new ConcurrentLinkedQueue[EnqueueableTask]()
+	private [capsul] val ring = new Ring[StagedWork](bufLen)
+	private [capsul] val queue = new ConcurrentLinkedQueue[StagedWork]()
 	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0))
 	private [capsul] val numFuturesRef:Ring.AtomicInt = Ring.Atomic(0)
 
@@ -172,7 +163,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	import Log.log
 	import Ring._
 
-	def enqueueOnly[R](task: EnqueueableTask with UnitOfWork.HasEnqueuePromise[Unit]): Future[Unit] = {
+	def enqueueOnly[R](task: StagedWork with HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (doEnqueue(task)) {
 			SequentialExecutor.successfulUnit
 		} else {
@@ -181,14 +172,14 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	def enqueue[R](
-		task: EnqueueableTask
-			with UnitOfWork.HasEnqueuePromise[Future[R]]
-			with UnitOfWork.HasResultPromise[R]
-	): StagedFuture[R] = {
+		task: StagedWork
+			with StagedWork.HasEnqueuePromise[Future[R]]
+			with HasResultPromise[R]
+	): Future[Future[R]] = {
 		if (doEnqueue(task)) {
-			StagedFuture.accepted(task.resultPromise.future)
+			Future.successful(task.resultPromise.future)
 		} else {
-			StagedFuture(task.enqueuedPromise.future)
+			task.enqueuedPromise.future
 		}
 	}
 
@@ -250,7 +241,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 	}
 
 	@tailrec
-	private def doEnqueue(work: EnqueueableTask):Boolean = {
+	private def doEnqueue(work: StagedWork):Boolean = {
 		val logId = Log.scope(this, "Executor.doEnqueue")
 		val state = stateRef.get
 		val spaceAvailable = ring.spaceAvailable(state, numFuturesRef.get)
@@ -346,22 +337,22 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					// spin waiting for item to be set
 					item = slot.get
 				}
+				slot.set(null) // must be nulled before advancing
 
-				item.run().filter(!_.isCompleted) match {
-					case None => {
+				item.spawn() match {
+					case Completed => {
+						// immediately complete
 						log("ran sync node")
 						fullyCompletedItems = fullyCompletedItems + 1
 					}
-					case Some(f) => {
+					case Async(f) => {
 						log("ran async node")
-						// numFuturesRef.increment()
 						var numFutures = numFuturesRef.get()
 						while(!numFuturesRef.compareAndSet(numFutures, numFutures+1)) {
 							numFutures = numFuturesRef.get()
 						}
 						// now that we've incremented running futures, set it up to decrement on completion
 						f.onComplete { _ =>
-							// numFuturesRef.decrement()
 							var numFutures = numFuturesRef.get()
 							while(!numFuturesRef.compareAndSet(numFutures, numFutures-1)) {
 								numFutures = numFuturesRef.get()
@@ -374,7 +365,6 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) {
 					}
 				}
 
-				slot.set(null) // must be nulled before advancing
 				currentHead = ring.inc(currentHead)
 
 				// Try updating state, but don't worry if it fails

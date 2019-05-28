@@ -6,7 +6,6 @@ import monix.eval.TaskSemaphore
 import monix.execution.Scheduler.Implicits.global
 import net.gfxmonk.capsul.examples.FutureUtils
 import net.gfxmonk.capsul._
-import net.gfxmonk.capsul.staged._
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -51,7 +50,7 @@ object StateBased {
 		// ready now, or they may be in-flight.
 		val fetches: Future[Queue[Future[String]]] =
 			FutureUtils.foldLeft(Queue.empty[Future[String]], resources) {
-				(accum, resource) => cache.get(resource).accepted.map(x => accum.enqueue(x))
+				(accum, resource) => cache.get(resource).map(x => accum.enqueue(x))
 			}
 
 		fetches.flatMap(fs => Future.sequence(fs).map(_.toList))
@@ -70,11 +69,11 @@ object ActorBased {
 			case Request(resource:String) => cache.get(resource) match {
 				case Some(cached) => sender ! cached
 				case None => {
-					val future = StagedFuture(apiSemaphore.acquire.runAsync.map(_ => {
+					val future = apiSemaphore.acquire.runAsync.map(_ => {
 						val result = Api.get(resource)
 						result.onComplete(_ => apiSemaphore.release.runAsync)
 						result
-					}))
+					})
 					cache.update(resource, future)
 					sender ! future
 				}
@@ -96,7 +95,7 @@ object ActorBased {
 			(accum, resource) => {
 				for {
 					response <- (cache ? Cache.Request(resource)).mapTo[StagedFuture[String]]
-					fetch <- response.accepted
+					fetch <- response
 				} yield accum.enqueue(fetch)
 			}
 		)

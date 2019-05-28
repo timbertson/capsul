@@ -22,9 +22,9 @@ class RingStressTest {
 	import testsupport.Common._
 	implicit val ec = new CountingExecutionContext(defaultEc)
 	val executor = SequentialExecutor(bufLen)
-	def futureWork(f: Future[Unit]) = UnitOfWork.FullAsync(() => f)
-	def noopWork = UnitOfWork.Full(() => ())
-	def noopEnqueue = UnitOfWork.EnqueueOnly(() => ())
+	def futureWork(f: Future[Unit]) = StagedWork.FullAsync(() => f)
+	def noopWork = StagedWork.Full(() => ())
+	def noopEnqueue = StagedWork.EnqueueOnly(() => ())
 	val readyFutures = repeatList(bufLen - 1) {
 		val promise = Promise[Unit]()
 		executor.enqueue(futureWork(promise.future))

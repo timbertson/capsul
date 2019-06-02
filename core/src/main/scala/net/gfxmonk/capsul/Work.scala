@@ -21,14 +21,14 @@ trait AtomicWork {
 }
 
 object AtomicWork {
-	private [capsul] class EnqueueOnly[A](fn: Function0[A])
+	case class EnqueueOnly[A](fn: Function0[A])
 		extends AtomicWork {
 		final override def run(): Unit = {
 			fn()
 		}
 	}
 
-	private [capsul] class Full[A](fn: Function0[A])
+	case class Full[A](fn: Function0[A])
 		extends AtomicWork with HasResultPromise[A] {
 		final override def run(): Unit = {
 			resultPromise.success(fn())

@@ -120,7 +120,7 @@ class SequentialExecutor(queue: util.Queue[AtomicWork])(implicit ec: ExecutionCo
 	}
 
 	// A runnable which repeatedly consumes & runs items in the queue until it's empty
-	val workLoop: Runnable = new Runnable() {
+	private val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
 			loop(1000)
 		}

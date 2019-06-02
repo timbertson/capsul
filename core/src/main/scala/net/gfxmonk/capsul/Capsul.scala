@@ -22,7 +22,7 @@ object Capsul {
 	def apply[T](v: T, bufLen: Int)(implicit ec: ExecutionContext) =
 		new Capsul[T](v, SequentialExecutor(bufLen))
 
-	def apply[T](v: T, thread: SequentialExecutor)(implicit ec: ExecutionContext) =
+	def apply[T](v: T, thread: CapsulExecutor)(implicit ec: ExecutionContext) =
 		new Capsul[T](v, thread)
 }
 
@@ -92,6 +92,10 @@ class Capsul[T](init: T, thread: CapsulExecutor) {
 	def sendAccessAsync[A](fn: T => Future[A]): Future[Unit] =
 		thread.enqueueOnly(StagedWork.EnqueueOnly(() => fn(state.current)))
 
+	/** Send a mutate operation which returns a [[Future]][R] */
+	def sendMutateAsync[A](fn: Ref[T] => Future[A]): Future[Unit] =
+		thread.enqueueOnly(StagedWork.EnqueueOnly(() => fn(state)))
+
 	/** Return the current state value */
 	def current: Future[T] =
 		thread.enqueue(StagedWork.Full(() => state.current)).flatten
@@ -111,10 +115,6 @@ class Capsul[T](init: T, thread: CapsulExecutor) {
 	/** Perform a function with the current state */
 	def access[R](fn: T => R): Future[Future[R]] =
 		thread.enqueue(StagedWork.Full(() => fn(state.current)))
-
-	/** Perform a mutation which returns a [[Future]][R] */
-	def mutateAsync[R](fn: Ref[T] => Future[R])(implicit ec: ExecutionContext): Future[Future[R]] =
-		thread.enqueue(new StagedWork.FullAsync[R](() => fn(state)))
 
 	/** Perform an access which returns a [[Future]][R] */
 	def accessAsync[R](fn: T => Future[R])(implicit ec: ExecutionContext): Future[Future[R]] =

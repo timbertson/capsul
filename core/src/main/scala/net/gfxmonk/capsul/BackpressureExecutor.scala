@@ -169,10 +169,14 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 		}
 	}
 
-	private def startIfStopped(state: State) {
-		if (!Ring.isRunning(state)) {
+	private def startIfStopped(prevState: State) {
+		if (!Ring.isRunning(prevState)) {
 			ec.execute(workLoop)
 		}
+	}
+
+	private def startIfNecessary(prevState: State, nextState: State) {
+		if (Ring.isRunning(nextState)) startIfStopped(prevState)
 	}
 
 	@tailrec
@@ -182,8 +186,9 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 
 		val numQueued = Ring.numQueued(state)
 		val spaceAvailable = ring.spaceAvailable(state)
-		val numDequeue = Math.min(spaceAvailable, numQueued)
 		val hasSpaceForWork = spaceAvailable > numQueued
+		log(s"spaceAvailable = ${spaceAvailable}, numQueued = ${numQueued} from state ${Ring.repr(state)}")
+		val numDequeue = if (hasSpaceForWork) numQueued else spaceAvailable
 
 		// either we reserve `numQueued+1` slots, or we dequeue as many as we can and add one queued
 		val nextState = if (hasSpaceForWork) {
@@ -207,14 +212,15 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 			val prevTail = Ring.tailIndex(state)
 			val nextIdx:Idx = dequeueItemsInto(prevTail, numDequeue)
 			if (hasSpaceForWork) {
-				log(s"enqueue: setting item @ slot idx $nextIdx after dequeueing $numDequeue (${Ring.repr(nextState)})}")
+				log(s"setting item @ slot idx $nextIdx after dequeueing $numDequeue (${Ring.repr(nextState)})}")
 				ring.at(nextIdx).set(work)
 			} else {
-				log(s"dequeued $numDequeue pending items; queueing work due to full buffer (${Ring.repr(nextState)})}")
+			// final slot is current tail + numQueued
+				log(s"dequeued $numDequeue pending items; queueing work due to full buffer (${Ring.repr(nextState)}). Final destination @ slot idx ${ring.add(nextIdx, Ring.numQueued(nextState))}")
 				// we reserved a `queued` slot, so populate that
 				queue.add(work)
 			}
-			startIfStopped(state)
+			startIfNecessary(state, nextState)
 			hasSpaceForWork
 		} else {
 			// couldn't reserve tail; retry
@@ -235,7 +241,7 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 				log(s"awaiting item @ slot idx $idx")
 				queued = queue.poll()
 			}
-			log(s"dequeueing item @ slot idx $idx")
+			log(s"setting dequeued item @ slot idx $idx")
 			ring.at(idx).set(queued)
 			queued.enqueuedAsync()
 			idx = ring.inc(idx)
@@ -273,12 +279,17 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 
 				while (item == null) {
 					// spin waiting for item to be set
+//					val now = System.currentTimeMillis // NOCOMMIT
+//					if (now  - startTime > 1000) {
+//						log(s"Still waiting for item @ slot idx $currentHead")
+//						startTime = now
+//					}
 					item = slot.get
 				}
-				log(s"running item @ slot idx $currentHead")
-				log(s"nulling item")
+				log(s"nulling item @ slot idx $currentHead")
 				slot.set(null)
 
+				log(s"running item @ slot idx $currentHead")
 				item.spawn() match {
 					case Completed => {
 						// already done, can complete sync
@@ -312,9 +323,10 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 				} else {
 					// needs to happen before we mark ourselves as stopped
 					nextTaskIndex = currentTail
-					if (stateRef.compareAndSet(state, Ring.stopped(state))) {
+					val stopped = Ring.stopped(state)
+					if (stateRef.compareAndSet(state, stopped)) {
 						// no new tasks, marked as stopped
-						log(s"shutting down with state ${Ring.repr(state)}")
+						log(s"shutting down with state ${Ring.repr(stopped)}")
 					} else {
 						// CAS fail, retry loop
 						maybeShutdown(maxItems, currentTail)
@@ -325,7 +337,7 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 
 		@tailrec
 		private def completeUnordered(n: Int): Unit = {
-			val logId = Log.scope(self, "WorkLoop.completeUnordered")
+			val logId = Log.scope(self, s"WorkLoop.completeUnordered($n)")
 			val state = stateRef.get
 			val nextState = Ring.setHead(state, ring.add(Ring.headIndex(state), n))
 			if (stateRef.compareAndSet(state, nextState)) {

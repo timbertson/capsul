@@ -39,8 +39,8 @@ object SequentialExecutor {
 		import capsul.BaseRing._
 
 		// State is stored as a uint64. head & tail indices both get 4 bytes, numQueued gets 8 bytes.
-		val MAX_QUEUED = Math.pow(2, (8 * 4) - 1) // TODO: CHECK
-		val MAX_SIZE = Math.pow(2, (8 * 2) - 1) // TODO: CHECK
+		val MAX_QUEUED:Long = Math.pow(2, (8 * 4) - 1).toLong // TODO: CHECK
+		val MAX_SIZE:Long = Math.pow(2, (8 * 2) - 1).toLong // TODO: CHECK
 		def queueSpaceExhausted(t: State): Boolean = numQueued(t) == MAX_QUEUED
 
 		// if there's no work, we are (or should be) stopped

@@ -20,7 +20,7 @@ object Log {
 //	val ENABLE = true; type Ctx = LogCtx
 	val ENABLE = false; type Ctx = Unit
 
-	val MAX_LOG_LINES = 1000
+	val MAX_LOG_LINES = 40000
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
 	class MutableRef[T](val generation: Int, initialValue: T) {
@@ -67,6 +67,10 @@ object Log {
 			threadLocal.set(Some(buf))
 			buf
 		}
+	}
+
+	def objectId(obj: Any): String = {
+		System.identityHashCode(obj).toHexString
 	}
 
 	var nextId: Int = 0
@@ -213,7 +217,7 @@ object Log {
 
 		def makeId(obj: Any, desc: String) = {
 			nextId += 1
-			val id = if (obj == null) nextId else s"${System.identityHashCode(obj).toHexString}.$nextId"
+			val id = if (obj == null) nextId else s"${objectId(obj)}.$nextId"
 			new LogCtx(s"$id/$desc", Log.threadBuffer)
 		}
 

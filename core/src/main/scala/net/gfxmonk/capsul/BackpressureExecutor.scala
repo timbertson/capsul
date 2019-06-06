@@ -181,7 +181,7 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 
 	@tailrec
 	private def doEnqueue(work: StagedWork):Boolean = {
-		val logId = Log.scope(this, "doEnqueue")
+		val logId = Log.scope(this, s"doEnqueue(${Log.objectId(work)})")
 		val state = stateRef.get
 
 		val numQueued = Ring.numQueued(state)
@@ -208,17 +208,22 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 		}
 		if (stateRef.compareAndSet(state, nextState)) {
 			// We reserved all the slots we asked for, now assign into those slots
-			// log(s"reserved ${numDequeue} dequeue and ${extraSlots} extra slots from ${Ring.tailIndex(state)}")
 			val prevTail = Ring.tailIndex(state)
+
+			if (!hasSpaceForWork) {
+				// Note: we must always maintain the invariant that if we increment `numQueued`, then we *must*
+				// ensure that much work is pullable from `queue`. So while it'd be logical to dequeue items
+				// into `prevTail` before populating the current slot, that can potentially block (if queued
+				// work is stolen by other threads), and cause this thread to deadlock itself.
+				queue.add(work)
+			}
+
 			val nextIdx:Idx = dequeueItemsInto(prevTail, numDequeue)
 			if (hasSpaceForWork) {
-				log(s"setting item @ slot idx $nextIdx after dequeueing $numDequeue (${Ring.repr(nextState)})}")
+				log(s"setting item @ slot idx $nextIdx after dequeueing $numDequeue (${Ring.repr(nextState)})")
 				ring.at(nextIdx).set(work)
 			} else {
-			// final slot is current tail + numQueued
-				log(s"dequeued $numDequeue pending items; queueing work due to full buffer (${Ring.repr(nextState)}). Final destination @ slot idx ${ring.add(nextIdx, Ring.numQueued(nextState))}")
-				// we reserved a `queued` slot, so populate that
-				queue.add(work)
+				log(s"dequeued $numDequeue pending items; queueing work due to full buffer (${Ring.repr(nextState)}). Final destination @ slot idx ${ring.add(nextIdx, Ring.numQueued(nextState) - 1)}")
 			}
 			startIfNecessary(state, nextState)
 			hasSpaceForWork
@@ -234,14 +239,24 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 		var nextTail = ring.add(dest, numItems)
 		while(idx != nextTail) {
 			var queued = queue.poll()
+//			var startTime = 0L
 			while (queued == null) {
 				// spinloop, since reserved (but un-populated) slots
 				// in the ring will hold up the executor (and we
 				// also run this from the executor)
-				log(s"awaiting item @ slot idx $idx")
+//				if (startTime > 100) {
+//					// only bother checking clock time after 100 spins
+//					val now = System.currentTimeMillis
+//					if (now  - startTime > 1000) {
+//						log(s"Still waiting for queued item to go @ slot idx $idx")
+//						startTime = now
+//					}
+//				} else {
+//					startTime += 1
+//				}
 				queued = queue.poll()
 			}
-			log(s"setting dequeued item @ slot idx $idx")
+			log(s"setting dequeued item (${Log.objectId(queued)})} @ slot idx $idx")
 			ring.at(idx).set(queued)
 			queued.enqueuedAsync()
 			idx = ring.inc(idx)
@@ -277,9 +292,10 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 				val slot = ring.at(currentHead)
 				var item = slot.get
 
+//				var startTime = 0L
 				while (item == null) {
 					// spin waiting for item to be set
-//					val now = System.currentTimeMillis // NOCOMMIT
+//					val now = System.currentTimeMillis
 //					if (now  - startTime > 1000) {
 //						log(s"Still waiting for item @ slot idx $currentHead")
 //						startTime = now
@@ -289,7 +305,7 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 				log(s"nulling item @ slot idx $currentHead")
 				slot.set(null)
 
-				log(s"running item @ slot idx $currentHead")
+				log(s"running item (${Log.objectId(item)}}) @ slot idx $currentHead")
 				item.spawn() match {
 					case Completed => {
 						// already done, can complete sync

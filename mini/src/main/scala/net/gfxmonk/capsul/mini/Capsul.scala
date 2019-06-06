@@ -111,47 +111,56 @@ class SequentialExecutor(queue: util.Queue[AtomicWork])(implicit ec: ExecutionCo
 	}
 
 	private def doEnqueue(work: AtomicWork) {
+		val prevState = stateRef.getAndIncrement()
 		queue.add(work)
-		val state = stateRef.getAndIncrement()
 		// if state was 0, run loop
-		if (state == 0) {
+		if (prevState == 0) {
 			ec.execute(workLoop)
 		}
 	}
 
 	// A runnable which repeatedly consumes & runs items in the queue until it's empty
-	private val workLoop: Runnable = new Runnable() {
+	private [capsul] val workLoop: Runnable = new Runnable() {
 		final def run(): Unit = {
-			loop(1000)
+			loop(1000, 0, stateRef.get)
 		}
 
 		@tailrec
-		private def loop(_maxItems: Int): Unit = {
-			var itemsConsumed = 0
-			var maxItems = _maxItems
-
-			var item = queue.poll()
-
-			while (item != null) {
-				itemsConsumed += 1
-				maxItems -= 1
-				item.run()
-				if (maxItems <= 0) {
-					val newItems = stateRef.addAndGet(-1 * itemsConsumed)
-					itemsConsumed = 0
-					if (newItems > 0) {
-						// definitely new items; trampoline
-						return ec.execute(workLoop)
-					}
-					// else may or may not be new items, keep polling
-				}
-				item = queue.poll()
+		private def waitForWork(): AtomicWork = {
+			val item = queue.poll()
+			if (item == null) {
+				waitForWork()
+			} else {
+				item
 			}
+		}
 
-			val newItems = stateRef.addAndGet(-1 * itemsConsumed)
-			if (newItems > 0) {
-				// there's more work now, keep going
-				return loop(maxItems)
+		private def tryShutdown(itemsConsumed: Long): Long = {
+			stateRef.addAndGet(-1 * itemsConsumed)
+		}
+
+		@tailrec
+		private def loop(maxItems: Int, itemsConsumed: Int, availableItems: Long): Unit = {
+			if (maxItems == 0) {
+				// trampoline to prevent thread starvation
+				if (tryShutdown(itemsConsumed) > 0) {
+					// available work remains above zero,
+					// trampoline and keep running
+					ec.execute(workLoop)
+				}
+			} else  if (itemsConsumed == availableItems) {
+				// we've completed as much work as we know about,
+				// either pick up more or stop
+				val remainingItems = tryShutdown(itemsConsumed)
+				if (remainingItems > 0) {
+					// there's more work now, keep going
+					loop(maxItems, 0, remainingItems)
+				}
+			} else {
+				// otherwise, pick the next task and run it
+				val item = waitForWork()
+				item.run()
+				loop(maxItems-1, itemsConsumed+1, availableItems)
 			}
 		}
 	}

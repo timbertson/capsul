@@ -19,7 +19,7 @@ import scala.concurrent.{ExecutionContext, Future}
  * If (head + size) % (2*size) == tail, the queue is full
  * (these wrap to the same index mod `size`, but are on different sides / folds)
  *
- * The queue of an executoe is managed by:
+ * The queue of an executor is managed by:
  * state: (head|tail|numQueued) - bin packed to save on tuple allocation (we make and discard a _lot_ of these)
  * numFutures: Atomic[Int] (could do separate numFuturesStarted and numFuturesStopped, but have to take care of wraparound)
  * queue: a ConcurrentLinkedQueue for putting items which haven't yet been accepted into the ring buffer.
@@ -360,7 +360,7 @@ class SequentialExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends Cap
 				log(s"shutting down with state ${Ring.repr(state)} and ${numFuturesRef.get} pending futures")
 				return
 			} else {
-				// more work arrived, kepp going
+				// more work arrived, keep going
 				return loop(maxItems)
 			}
 		}

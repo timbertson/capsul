@@ -11,7 +11,7 @@ import scala.concurrent.{ExecutionContext, Future}
 
 /** A wrapper for getting / setting state */
 class Ref[T](init:T) {
-	private var v = init
+	@volatile private var v = init
 	def current = v
 	def set(updated:T) {
 		v = updated

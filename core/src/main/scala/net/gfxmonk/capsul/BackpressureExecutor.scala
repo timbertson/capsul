@@ -18,7 +18,7 @@ import scala.concurrent.{ExecutionContext, Future}
  * If (head + size) % (2*size) == tail, the queue is full
  * (these wrap to the same index mod `size`, but are on different sides / folds)
  *
- * The queue of an executoe is managed by:
+ * The queue of an executor is managed by:
  * state: (head|tail|numQueued) - bin packed to save on tuple allocation (we make and discard a _lot_ of these)
  * numFutures: Atomic[Int] (could do separate numFuturesStarted and numFuturesStopped, but have to take care of wraparound)
  * queue: a ConcurrentLinkedQueue for putting items which haven't yet been accepted into the ring buffer.
@@ -91,7 +91,6 @@ object BackpressureExecutor {
 	}
 
 	private [capsul] class Ring[T >: Null <: AnyRef](size: Int) extends capsul.BaseRing[T](size) {
-		import capsul.BaseRing._
 		import Ring._
 		if (size > MAX_SIZE) {
 			throw new RuntimeException(s"size ($size) is larger then the maximum ($MAX_SIZE)")
@@ -132,23 +131,6 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 	private [capsul] val queue = new ConcurrentLinkedQueue[StagedWork]()
 	private [capsul] val stateRef:Ring.AtomicState = Ring.Atomic(Ring.make(0,0,0, false))
 
-	// TODO decide on API
-	def sendAsync[R](fn: Function0[Future[R]]): Future[Unit] = {
-		enqueueOnly(StagedWork.EnqueueOnlyAsync(fn))
-	}
-	def send[R](fn: Function0[_]): Future[Unit] = {
-		enqueueOnly(StagedWork.EnqueueOnly(fn))
-	}
-	def run[R](fn: Function0[R]): Future[Future[R]] = {
-		enqueue(StagedWork.Full(fn))
-	}
-	def runAsync[R](fn: Function0[Future[R]]): Future[Future[R]] = {
-		enqueue(StagedWork.FullAsync(fn))
-	}
-	def flatRunAsync[R](fn: Function0[Future[R]]): Future[R] = {
-		enqueue(StagedWork.FullAsync(fn)).flatten
-	}
-
 	final override def enqueueOnly[R](task: StagedWork with HasEnqueuePromise[Unit]): Future[Unit] = {
 		if (doEnqueue(task)) {
 			Future.unit
@@ -169,16 +151,6 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 		}
 	}
 
-	private def startIfStopped(prevState: State) {
-		if (!Ring.isRunning(prevState)) {
-			ec.execute(workLoop)
-		}
-	}
-
-	private def startIfNecessary(prevState: State, nextState: State) {
-		if (Ring.isRunning(nextState)) startIfStopped(prevState)
-	}
-
 	@tailrec
 	private def doEnqueue(work: StagedWork):Boolean = {
 		val logId = Log.scope(this, s"doEnqueue(${Log.objectId(work)})")
@@ -192,10 +164,8 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 
 		// either we reserve `numQueued+1` slots, or we dequeue as many as we can and add one queued
 		val nextState = if (hasSpaceForWork) {
-			// reserve extra slot for this work
 			ring.dequeue(state, numQueued, 1)
 		} else {
-			// dequeue possibly-zero waiting items and enqueue one for this work
 			val next = ring.dequeueAndEnqueue(state, numDequeue)
 			if (Ring.queueSpaceExhausted(next)) {
 				// I can't imagine this happening, but an exception seems
@@ -207,17 +177,14 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 			next
 		}
 		if (stateRef.compareAndSet(state, nextState)) {
-			// We reserved all the slots we asked for, now assign into those slots
-			val prevTail = Ring.tailIndex(state)
-
 			if (!hasSpaceForWork) {
 				// Note: we must always maintain the invariant that if we increment `numQueued`, then we *must*
-				// ensure that much work is pullable from `queue`. So while it'd be logical to dequeue items
-				// into `prevTail` before populating the current slot, that can potentially block (if queued
-				// work is stolen by other threads), and cause this thread to deadlock itself.
+				// ensure that much work is pullable from `queue`. So make sure we put extra work into `queue`
+				// before potentially consuming it via dequeueItemsInto.
 				queue.add(work)
 			}
 
+			val prevTail = Ring.tailIndex(state)
 			val nextIdx:Idx = dequeueItemsInto(prevTail, numDequeue)
 			if (hasSpaceForWork) {
 				log(s"setting item @ slot idx $nextIdx after dequeueing $numDequeue (${Ring.repr(nextState)})")
@@ -233,27 +200,25 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 		}
 	}
 
+	private def startIfStopped(prevState: State) {
+		if (!Ring.isRunning(prevState)) {
+			ec.execute(workLoop)
+		}
+	}
+
+	private def startIfNecessary(prevState: State, nextState: State) {
+		if (Ring.isRunning(nextState)) startIfStopped(prevState)
+	}
+
 	private def dequeueItemsInto(dest: Idx, numItems: Int): Idx = {
 		val logId = Log.scope(this, s"dequeueItemsInto($dest, $numItems)")
 		var idx = dest
 		var nextTail = ring.add(dest, numItems)
 		while(idx != nextTail) {
 			var queued = queue.poll()
-//			var startTime = 0L
 			while (queued == null) {
 				// spinloop, since reserved (but un-populated) slots
-				// in the ring will hold up the executor (and we
-				// also run this from the executor)
-//				if (startTime > 100) {
-//					// only bother checking clock time after 100 spins
-//					val now = System.currentTimeMillis
-//					if (now  - startTime > 1000) {
-//						log(s"Still waiting for queued item to go @ slot idx $idx")
-//						startTime = now
-//					}
-//				} else {
-//					startTime += 1
-//				}
+				// in the ring will hold up the executor
 				queued = queue.poll()
 			}
 			log(s"setting dequeued item (${Log.objectId(queued)})} @ slot idx $idx")
@@ -283,23 +248,13 @@ class BackpressureExecutor(bufLen: Int)(implicit ec: ExecutionContext) extends C
 			val readyItems = ring.numItems(headIndex, currentTail)
 			var completedSync = 0
 
-			// There must be something pending. Only this thread updates nextTaskIndex
-			// (in maybeShutdown), and it terminates if the ring becomes empty
-
 			log(s"workLoop: ${Ring.repr(state)}, head = $currentHead, tail = $currentTail")
 			while (currentHead != currentTail) {
 				log(s"loading item @ slot idx $currentHead")
 				val slot = ring.at(currentHead)
 				var item = slot.get
 
-//				var startTime = 0L
 				while (item == null) {
-					// spin waiting for item to be set
-//					val now = System.currentTimeMillis
-//					if (now  - startTime > 1000) {
-//						log(s"Still waiting for item @ slot idx $currentHead")
-//						startTime = now
-//					}
 					item = slot.get
 				}
 				log(s"nulling item @ slot idx $currentHead")

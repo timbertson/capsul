@@ -238,7 +238,7 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 		Future(add(item))(workEc)
 	}
 
-	def runSeq2(makeThread: Int => CapsulExecutor)(implicit ec: ExecutionContext): Future[Int] = {
+	def runSeq(makeThread: Int => CapsulExecutor)(implicit ec: ExecutionContext): Future[Int] = {
 		import Pipeline._
 		val source = sourceIterator()
 		val sink = Capsul(0, makeThread(conf.bufLen))
@@ -503,7 +503,7 @@ class PerfTest {
 		val f = impl
 		val result = Try {
 			// Await.result(f(), Duration(2, TimeUnit.SECONDS))
-			Await.result(f(), Duration(6, TimeUnit.SECONDS))
+			Await.result(f(), Duration(10, TimeUnit.SECONDS))
 			// Await.result(f(), Duration.Inf)
 		}
 		if (result.isFailure) {
@@ -571,9 +571,7 @@ class PerfTest {
 
 		repeat("counter", List(
 			"SimpleCapsul (unbounded) counter" -> (() => SimpleCounterState.run(countLimit)),
-			"Capsul / SequentialExecutor (unbounded) counter" -> (() => CounterState.run(countLimit, SequentialExecutor(bufLen))),
 			"Capsul / SequentialExecutor (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, SequentialExecutor(bufLen))),
-			"Capsul / BackpressureExecutor (unbounded) counter" -> (() => CounterState.run(countLimit, BackpressureExecutor(bufLen))),
 			"Capsul / BackpressureExecutor (backpressure) counter" -> (() => CounterState.runWithBackpressure(countLimit, BackpressureExecutor(bufLen))),
 			"Akka counter" -> (() => CounterActor.run(countLimit)),
 			"Akka counter (backpressure)" -> (() => CounterActor.runWithBackpressure(countLimit, bufLen = bufLen))
@@ -581,10 +579,10 @@ class PerfTest {
 
 		def runPipelineComparison(desc: String, conf: PipelineConfig) = {
 			repeat(s"$desc pipeline ($conf, ${conf.expectedResult})", List(
-				s"* Capsul (BpEx)" -> (() => new Pipeline(conf).runSeq2(c => BackpressureExecutor(c))),
-//				s"* Capsul (SeqEx)" -> (() => new Pipeline(conf).runSeq2(c => SequentialExecutor(c))),
-				s"Akka Streams" -> (() => new Pipeline(conf).runAkkaStreams())
-				// s"Monix" -> (() => new Pipeline(conf).runMonix()(monixScheduler))
+				s"* Capsul (BpEx)" -> (() => new Pipeline(conf).runSeq(c => BackpressureExecutor(c))),
+				s"* Capsul (SeqEx)" -> (() => new Pipeline(conf).runSeq(c => SequentialExecutor(c))),
+				s"Akka Streams" -> (() => new Pipeline(conf).runAkkaStreams()),
+				s"Monix" -> (() => new Pipeline(conf).runMonix()(monixScheduler))
 			))
 		}
 

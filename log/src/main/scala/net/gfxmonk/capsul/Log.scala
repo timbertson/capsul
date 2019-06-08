@@ -1,12 +1,14 @@
 package net.gfxmonk.capsul.internal
 
 import java.util.concurrent.ConcurrentHashMap
+
 import scala.util.Sorting
 import scala.collection._
 import scala.collection.immutable.Queue
 import scala.collection.JavaConverters._
 import scala.language.experimental.macros
 import scala.annotation.tailrec
+import scala.reflect.ClassTag
 
 // efficient in-memory threadsafe log collection, used
 // for debugging issues (SequentialExecutor is augmented
@@ -20,7 +22,7 @@ object Log {
 //	val ENABLE = true; type Ctx = LogCtx
 	val ENABLE = false; type Ctx = Unit
 
-	val MAX_LOG_LINES = 40000
+	val MAX_LOG_LINES = 10000
 	type LogEntry = (Long,String)
 	type ThreadLogEntry = (Long,LogEntry)
 	class MutableRef[T](val generation: Int, initialValue: T) {
@@ -28,7 +30,55 @@ object Log {
 		def set(t: T) { item = t }
 		def get: T = { item }
 	}
-	type LogBuffer = MutableRef[Queue[LogEntry]]
+
+	private [capsul] object BaseRing {
+		type Idx = Int
+	}
+	private [capsul] class Ring[T >: Null <: AnyRef : ClassTag](size: Int) {
+		import BaseRing._
+		private val negativeOne = size - 1
+		private var arr = Array.fill[T](size)(null)
+
+		var tail: Idx = 0 // next insertion point.
+
+		def append(item: T): Unit = {
+			arr.update(tail, item)
+			tail += 1
+		}
+
+		def toList(): List[T] = {
+			// traverse backwards, ignoring nulls
+			var i = dec(tail)
+			var q = Queue[T]()
+			while(i != tail) {
+				val item = at(i)
+				if (item != null) {
+					q = item +: q
+				}
+				i = dec(i)
+			}
+			q.toList
+		}
+
+		final def at(idx: Idx): T = arr(idx) // unsafe woo
+
+		final def add(i: Idx, n: Int) = {
+			// assumes `n` is never greater than `size`
+			val result = i + n
+			if (result >= size) {
+				result - size
+			} else {
+				result
+			}
+		}
+
+		final def inc(a: Idx) = add(a,1)
+
+		// actually adding a negative is problematic due to `%` behaviour for negatives
+		final def dec(a: Idx): Idx = add(a, negativeOne)
+	}
+
+	private [capsul] type LogBuffer = MutableRef[Ring[LogEntry]]
 
 	@volatile private var generation: Int = 0
 	private lazy val threads = {
@@ -50,15 +100,15 @@ object Log {
 		}
 	}
 
-	private val threadLocal = ThreadLocal.withInitial[Option[MutableRef[Queue[LogEntry]]]](() => None)
+	private val threadLocal = ThreadLocal.withInitial[Option[LogBuffer]](() => None)
 
-	def threadBuffer = {
+	private def threadBuffer = {
 		val currentGeneration = generation
 		threadLocal.get.filter(_.generation == currentGeneration).getOrElse {
 			val id = Thread.currentThread().getId()
 			val buf = Option(threads.get(id)) match {
 				case None => {
-					val buf: LogBuffer = new MutableRef(currentGeneration, Queue[LogEntry]())
+					val buf: LogBuffer = new MutableRef(currentGeneration, new Ring[LogEntry](MAX_LOG_LINES))
 					threads.putIfAbsent(id, buf)
 					threads.get(id)
 				}
@@ -84,7 +134,6 @@ object Log {
 	}
 
 	def apply(msg: String): Unit = macro Macros.applyImpl
-
 
 	def dump() {
 		ifEnabled {
@@ -118,7 +167,7 @@ object Log {
 			try {
 				val buffers = threads.entrySet().asScala.map { case entry =>
 					val tid = entry.getKey
-					var logs = entry.getValue.get
+					var logs = entry.getValue.get.toList
 					if (logs.size == MAX_LOG_LINES) {
 						// insert a marker so we can tell that there may have been clipping
 						val ts = logs.head._1
@@ -208,11 +257,7 @@ object Log {
 
 		def doLog(buf: LogBuffer, s: String) {
 			val time = System.nanoTime()
-			var queue = buf.get.enqueue(time -> s)
-			if (queue.length > MAX_LOG_LINES) {
-				queue = queue.dequeue._2
-			}
-			buf.set(queue)
+			buf.get.append(time -> s)
 		}
 
 		def makeId(obj: Any, desc: String) = {
@@ -225,6 +270,5 @@ object Log {
 			nextId += 1
 			new LogCtx(s"$desc.$nextId", Log.threadBuffer)
 		}
-
 	}
 }

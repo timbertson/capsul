@@ -205,30 +205,6 @@ object SimpleCounterState {
 		}
 		counter.current
 	}
-
-//	def runWithBackpressure(limit: Int, bufLen: Int)(implicit ec: ExecutionContext): Future[Int] = {
-////		val counter = mini.Capsul(0)
-//		import Log._
-//		val counter = new Ref(0)
-//		val buffer = BackpressureExecutor(bufLen)
-//		val result = Promise[Int]()
-//		def loop(limit: Int): Unit = {
-//			if (limit == 0) {
-//				buffer.send { () =>
-//					result.success(counter.current)
-//				}
-//			} else {
-//				buffer.send { () =>
-//					counter.set(counter.current +1)
-////					counter.transform(_ + 1)
-//				}.onComplete { _: Try[Unit] =>
-//					loop(limit - 1)
-//				}
-//			}
-//		}
-//		loop(limit)
-//		result.future
-//	}
 }
 
 
@@ -248,7 +224,10 @@ case class PipelineConfig(
 class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 	import Log.log
 	val threadPool = PerfTest.makeThreadPool(conf.parallelism)
-	val workEc = ExecutionContext.fromExecutor(threadPool)
+	val workEc = ExecutionContext.fromExecutor(threadPool, e => {
+		println("executor.reportException")
+		throw e
+	})
 	def add(item: Int) = {
 		Sleep.jittered(conf.timePerStep, conf.jitter)
 		item + 1
@@ -266,7 +245,7 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 
 		val drained = Promise[Int]()
 		def finalize(item: Option[Int]): Future[Unit] = {
-			val logId = Log.scope(s"finalize")
+			val logId = Log.scope(s"finalize($item)")
 			log(s"finalize for item: $item")
 			item match {
 				case Some(item) => sink.sendTransform { current =>
@@ -280,53 +259,78 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 					log("reading the final state")
 					sink.sendAccess[Unit] { count =>
 						log(s"final count: $count")
-						// println(s"final count: $count")
-						// drained.failure(new RuntimeException("Got: " + count))
-						drained.success(count)
+						if (count != conf.expectedResult) {
+							drained.failure(new RuntimeException(s"incorrect result: ${count}"))
+						} else {
+							drained.success(count)
+						}
 					}
 				}
 			}
-			Future.unit
 		}
 
-		def singleStage(sink: Function[Option[Int], Future[Unit]]):Function[Option[Int], Future[Unit]] = {
+		def singleStage(sink: Function[Option[Int], Future[Unit]], depth: Int):Function[Option[Int], Future[Unit]] = {
 			val queue = new ConcurrentLinkedQueue[Item]()
-			val queueExecutor = makeThread(conf.bufLen)
-			val pollExecutor = mini.SequentialExecutor.unbounded()
+			val pushing: Option[Option[Future[Unit]]] = None
+			val pushExecutor = makeThread(conf.bufLen)
+			val popState = mini.Capsul(true)
+
+			def markUnblocked(_enqueued: Try[Unit]): Unit = {
+				// override canPush to true and complete from head
+				popState.sendTransform { _: Boolean =>
+					completeFromHead(true)
+				}
+			}
 
 			@tailrec
-			def completeFromHead() {
-				val logId = Log.scope("completeFromHead")
+			def completeFromHead(canPush: Boolean): Boolean = {
+				if (!canPush) return false
+				val logId = Log.scope(s"completeFromHead[$depth]")
 				Option(queue.peek()) match {
 					case Some((calc, promise)) => calc match {
 						case Some(f) => f.value match {
-							case None => log("head is incomplete; continuing"); ()
+							case None => {
+								log(s"head is incomplete; continuing")
+								true
+							}
 							case Some(result) => {
-								log("head is complete, removing it")
+								log(s"head is complete, removing it")
 								queue.remove()
-								sink(Some(result.get)).onComplete(promise.complete)
-								completeFromHead()
+
+								val downstream = sink(Some(result.get))
+								downstream.onComplete(promise.complete)
+								val accepted = downstream.isCompleted
+								if (accepted) {
+									completeFromHead(true)
+								} else {
+									// prevent further downstream pushes
+									downstream.onComplete(markUnblocked)
+									false
+								}
 							}
 						}
 						case None => {
 							log("saw None")
 							queue.remove()
-							sink(None).onComplete(promise.complete)
+							sink(None)
+							true // shouldn't be any more work, so whatever...
 						}
 					}
-					case None => ()
+					case None => true
 				}
 			}
 
 			item => {
-				queueExecutor.enqueueOnly(StagedWork.EnqueueOnlyAsync[Unit] { () =>
-					val logId = Log.scope("calculation")
+				val logId = Log.scope(s"handle[$depth]")
+				log(s"received item: $item")
+				pushExecutor.enqueueOnly(StagedWork.EnqueueOnlyAsync[Unit] { () =>
+					val logId = Log.scope(s"calculation[$depth]")
 					log(s"calculating from input: $item")
 					val calc = item.map(process)
 					val done = Promise[Unit]()
 					queue.add((calc, done))
 					calc.getOrElse(Future.unit).onComplete { _ =>
-						pollExecutor.enqueueOnly(AtomicWork.EnqueueOnly[Unit](completeFromHead))
+						popState.sendTransform(completeFromHead)
 					}
 					done.future
 				})
@@ -340,85 +344,33 @@ class Pipeline(conf: PipelineConfig)(implicit ec: ExecutionContext) {
 			if (stages == 0) {
 				sink
 			} else {
-				singleStage(connect(sink, stages-1))
+				singleStage(connect(sink, stages-1), stages)
 			}
 		}
 
 		val fullPipeline = connect(finalize, conf.stages)
-		def pushWork():Future[Unit] = {
+		def pushWork(): Unit = {
 			val logId = Log.scope(s"Pipeline")
 			if (source.hasNext) {
 				val item = source.next
 				log(s"pushWork: begin item $item")
-				fullPipeline(Some(item)).flatMap { case () => pushWork() }
+				fullPipeline(Some(item)).onComplete {
+					case Success(()) => pushWork()
+					case Failure(e) => drained.failure(e)
+				}
 			} else {
 				log(s"pushWork: ending pipeline")
 				fullPipeline(None)
 			}
 		}
 
-		pushWork().flatMap { case () =>
-			drained.future.onComplete( _ => threadPool.shutdown())
-			drained.future
+		pushWork()
+		drained.future.onComplete { result =>
+			Log(s"Shutting down ${threadPool} after result: ${result}}")
+			threadPool.shutdown()
 		}
+		drained.future
 	}
-
-//	def runSeq()(implicit ec: ExecutionContext): Future[Int] = {
-//		val source = sourceIterator()
-//		val sink = Capsul(0, bufLen = conf.bufLen)
-//		val drained = Promise[Int]()
-//		def finalize(item: Option[Int]): Future[Unit] = {
-//			val logId = Log.scope(s"Pipeline")
-//			item match {
-//				case Some(item) => sink.sendTransform { current =>
-//					val logId = Log.scope(s"Pipeline")
-//					val sum = current + item
-//					log(s"size = ${sum} after adding $item to $current")
-//					sum
-//				}
-//				case None => {
-//					// read the final state
-//					log("reading the final state")
-//					sink.access { count =>
-//						log(s"final count: $count")
-//						// println(s"final count: $count")
-//						// drained.failure(new RuntimeException("Got: " + count))
-//						drained.success(count)
-//					}
-//				}
-//			}
-//		}
-//
-//		def connect(
-//			sink: Function[Option[Int], Future[Unit]],
-//			stages: Int):Function[Option[Int], Future[Unit]] =
-//		{
-//			val stage = new PipelineStage(stages, conf.bufLen, process, sink)
-//			if (stages == 1) {
-//				stage.enqueue
-//			} else {
-//				connect(stage.enqueue, stages - 1)
-//			}
-//		}
-//
-//		val fullPipeline = connect(finalize, conf.stages)
-//		def pushWork():Future[Unit] = {
-//			val logId = Log.scope(s"Pipeline")
-//			if (source.hasNext) {
-//				val item = source.next
-//				log(s"pushWork: begin item $item")
-//				fullPipeline(Some(item)).flatMap { case () => pushWork() }
-//			} else {
-//				log(s"pushWork: ending pipeline")
-//				fullPipeline(None)
-//			}
-//		}
-//
-//		pushWork().flatMap { case () =>
-//			drained.future.onComplete( _ => threadPool.shutdown())
-//			drained.future
-//		}
-//	}
 
 	def runMonix()(implicit sched: monix.execution.Scheduler):Future[Int] = {
 		import monix.eval._
@@ -500,7 +452,10 @@ class PerfTest {
 	val bufLen = 50
 
 	val threadPool = PerfTest.makeThreadPool(4)
-	implicit val ec = ExecutionContext.fromExecutor(threadPool)
+	implicit val ec = ExecutionContext.fromExecutor(threadPool, e => {
+		println("executor.reportException")
+		throw e
+	})
 	// val globalEc = scala.concurrent.ExecutionContext.Implicits.global
 	def makeLines(n:Int=500) = Iterator.continually {
 		"hello this is an excellent line!"
